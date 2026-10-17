@@ -1,18 +1,17 @@
 import asyncio
 import logging
 import os
-import threading
-from flask import Flask
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-# Настройки
 TOKEN = os.environ.get("BOT_TOKEN")
-app = Flask(__name__)
+if not TOKEN:
+    raise ValueError("BOT_TOKEN не задан!")
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- БЛОК TELEGRAM БОТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
@@ -20,17 +19,27 @@ async def cmd_start(message: types.Message):
         "Скоро здесь можно будет искать детали по OEM-номеру и покупать их у проверенных разборок!"
     )
 
-async def start_bot():
-    logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
+async def health_check(request):
+    return web.Response(text="AutoBot is running!")
 
-# --- БЛОК FLASK (чтобы Render не засыпал) ---
-@app.route('/')
-def home():
-    return "AutoBot is running!"
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    # Удаляем вебхук и сбрасываем старые сообщения
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем фоновый polling
+    polling_task = asyncio.create_task(dp.start_polling(bot))
+    
+    # Запускаем веб-сервер для Render
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 5000)))
+    await site.start()
+    
+    logging.info("Бот запущен и слушает порт!")
+    await polling_task
 
 if __name__ == "__main__":
-    # Запускаем бота в отдельном потоке
-    threading.Thread(target=lambda: asyncio.run(start_bot()), daemon=True).start()
-    # Запускаем Flask (веб-сервер)
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    asyncio.run(main())

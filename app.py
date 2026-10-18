@@ -7,7 +7,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -35,7 +35,6 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Создаем таблицу объявлений
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
                 id SERIAL PRIMARY KEY,
@@ -44,7 +43,6 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # Создаем таблицу запросов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS requests (
                 id SERIAL PRIMARY KEY,
@@ -53,7 +51,6 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # Добавляем колонку created_at, если таблицы были созданы ранее без нее
         try:
             cursor.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
             cursor.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
@@ -70,35 +67,27 @@ def init_db():
 async def auto_clean_loop():
     while True:
         try:
-            logging.info("Запуск автоочистки старых объявлений...")
             conn = get_db_connection()
             cursor = conn.cursor()
-            
-            # Ищем объявления старше 30 дней
-            cursor.execute("SELECT id, message_id, name FROM ads WHERE created_at < NOW() - INTERVAL '30 days'")
+            cursor.execute("SELECT id, message_id FROM ads WHERE created_at < NOW() - INTERVAL '30 days'")
             old_ads = cursor.fetchall()
-            for ad_id, msg_id, name in old_ads:
+            for ad_id, msg_id in old_ads:
                 try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
                 except: pass
                 cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
-                logging.info(f"Удалено старое объявление: {name}")
 
-            # Ищем запросы старше 30 дней
-            cursor.execute("SELECT id, message_id, description FROM requests WHERE created_at < NOW() - INTERVAL '30 days'")
+            cursor.execute("SELECT id, message_id FROM requests WHERE created_at < NOW() - INTERVAL '30 days'")
             old_reqs = cursor.fetchall()
-            for req_id, msg_id, desc in old_reqs:
+            for req_id, msg_id in old_reqs:
                 try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
                 except: pass
                 cursor.execute("DELETE FROM requests WHERE id = %s", (req_id,))
-                logging.info(f"Удален старый запрос: {desc}")
 
             conn.commit()
             cursor.close()
             conn.close()
         except Exception as e:
             logging.error(f"Ошибка в автоочистке: {e}")
-        
-        # Ждем 1 час (3600 секунд) до следующей проверки
         await asyncio.sleep(3600)
 
 # --- СОСТОЯНИЯ ---
@@ -165,6 +154,45 @@ async def cmd_start(message: types.Message, state: FSMContext):
         reply_markup=get_main_menu()
     )
 
+# ==================== ОПЛАТА ЗВЕЗДАМИ И VIP ====================
+@dp.callback_query(F.data.startswith("pin_"))
+async def pin_ad_invoice(callback: types.CallbackQuery):
+    ad_id = callback.data.split("_")[1]
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT message_id FROM ads WHERE id = %s AND user_id = %s", (ad_id, callback.from_user.id))
+    result = cursor.fetchone(); cursor.close(); conn.close()
+    
+    if result:
+        # Выставляем счет на 50 звезд
+        await bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title="Закрепление объявления",
+            description="Ваше объявление будет закреплено в самом верху канала на 24 часа.",
+            payload=f"pin_{ad_id}_{result[0]}", # Передаем ID объявления и ID сообщения
+            provider_token="", # Для Stars оставляем пустым
+            currency="XTR", # Код валюты Telegram Stars
+            prices=[LabeledPrice(label="Закрепление", amount=50)], # 50 звезд
+        )
+    await callback.answer()
+
+@dp.pre_checkout_query()
+async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery):
+    # Обязательно подтверждаем готовность принять платеж
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@dp.message(F.successful_payment)
+async def process_successful_payment(message: types.Message):
+    payload = message.successful_payment.invoice_payload
+    # Достаем ad_id и msg_id из payload
+    _, ad_id, msg_id = payload.split("_")
+    
+    try:
+        # Закрепляем сообщение в канале
+        await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=int(msg_id), disable_notification=False)
+        await message.answer("✅ Оплата прошла успешно! Ваше объявление закреплено на 24 часа.")
+    except Exception as e:
+        await message.answer(f"❌ Оплата прошла, но не удалось закрепить: {e}")
+
 # ==================== АДМИН-ПАНЕЛЬ ====================
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -183,13 +211,7 @@ async def admin_stats(callback: types.CallbackQuery):
         cursor.execute("SELECT COUNT(*) FROM requests")
         req_count = cursor.fetchone()[0]
         cursor.close(); conn.close()
-        
-        await callback.message.edit_text(
-            f"📊 **Статистика базы данных:**\n\n"
-            f"📦 Объявлений о продаже: {ads_count}\n"
-            f"🔎 Запросов на покупку: {req_count}",
-            parse_mode="Markdown", reply_markup=get_admin_menu()
-        )
+        await callback.message.edit_text(f"📊 **Статистика:**\n\n📦 Объявлений: {ads_count}\n🔎 Запросов: {req_count}", parse_mode="Markdown", reply_markup=get_admin_menu())
     except Exception as e:
         await callback.message.edit_text(f"Ошибка: {e}", reply_markup=get_admin_menu())
     await callback.answer()
@@ -207,7 +229,7 @@ async def admin_del_ad(callback: types.CallbackQuery):
             except: pass
             cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
             conn.commit()
-            await callback.message.edit_text(f"✅ Последнее объявление «{name}» удалено.", reply_markup=get_admin_menu())
+            await callback.message.edit_text(f"✅ Объявление «{name}» удалено.", reply_markup=get_admin_menu())
         else:
             await callback.message.edit_text("В базе нет объявлений.", reply_markup=get_admin_menu())
         cursor.close(); conn.close()
@@ -220,15 +242,15 @@ async def admin_del_req(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
     try:
         conn = get_db_connection(); cursor = conn.cursor()
-        cursor.execute("SELECT id, message_id, description FROM requests ORDER BY id DESC LIMIT 1")
+        cursor.execute("SELECT id, message_id FROM requests ORDER BY id DESC LIMIT 1")
         result = cursor.fetchone()
         if result:
-            req_id, msg_id, desc = result
+            req_id, msg_id = result
             try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
             except: pass
             cursor.execute("DELETE FROM requests WHERE id = %s", (req_id,))
             conn.commit()
-            await callback.message.edit_text(f"✅ Последний запрос удален.", reply_markup=get_admin_menu())
+            await callback.message.edit_text("✅ Запрос удален.", reply_markup=get_admin_menu())
         else:
             await callback.message.edit_text("В базе нет запросов.", reply_markup=get_admin_menu())
         cursor.close(); conn.close()
@@ -298,9 +320,8 @@ async def process_price(message: types.Message, state: FSMContext):
     
     try:
         sent_msg = await bot.send_photo(chat_id=CHANNEL_ID, photo=data['photo_id'], caption=post_text, parse_mode="Markdown", reply_markup=contact_btn)
-        
         if GROUP_ID:
-            try: await bot.send_message(chat_id=GROUP_ID, text=f"🆕 **Новое объявление о продаже!**\n\n{post_text}", parse_mode="Markdown")
+            try: await bot.send_message(chat_id=GROUP_ID, text=f"🆕 **Новое объявление!**\n\n{post_text}", parse_mode="Markdown")
             except Exception: pass
 
         conn = get_db_connection(); cursor = conn.cursor()
@@ -344,21 +365,20 @@ async def wanted_budget(message: types.Message, state: FSMContext):
     
     try:
         sent_msg = await bot.send_message(chat_id=CHANNEL_ID, text=post_text, parse_mode="Markdown", reply_markup=contact_btn)
-        
         if GROUP_ID:
-            try: await bot.send_message(chat_id=GROUP_ID, text=f"🔔 **Новый запрос на поиск запчасти!**\n\n{post_text}", parse_mode="Markdown")
+            try: await bot.send_message(chat_id=GROUP_ID, text=f"🔔 **Новый запрос!**\n\n{post_text}", parse_mode="Markdown")
             except Exception: pass
 
         conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("INSERT INTO requests (user_id, description, oem, budget, message_id) VALUES (%s, %s, %s, %s, %s)", 
                        (message.from_user.id, data['desc'], data['oem'], message.text, sent_msg.message_id))
         conn.commit(); cursor.close(); conn.close()
-        await message.answer("✅ Ваш запрос опубликован в канале и отправлен в группу!", reply_markup=get_main_menu())
+        await message.answer("✅ Ваш запрос опубликован!", reply_markup=get_main_menu())
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}", reply_markup=get_main_menu())
     await state.clear()
 
-# ==================== МОИ ОБЪЯВЛЕНИЯ, ПОИСК, VIP ====================
+# ==================== МОИ ОБЪЯВЛЕНИЯ, ПОИСК ====================
 @dp.callback_query(F.data == "my_ads")
 async def show_my_ads(callback: types.CallbackQuery):
     try:
@@ -372,25 +392,12 @@ async def show_my_ads(callback: types.CallbackQuery):
             await callback.message.answer("Ваши объявления на продажу:")
             for ad_id, name, price in results:
                 buttons = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="⭐ Закрепить", callback_data=f"pin_{ad_id}"),
+                    InlineKeyboardButton(text="⭐ Закрепить (50 ⭐)", callback_data=f"pin_{ad_id}"),
                     InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{ad_id}")
                 ]])
                 await callback.message.answer(f"⚙️ {name}\n💰 {price} грн", reply_markup=buttons)
     except Exception as e:
         await callback.message.answer(f"Ошибка: {e}")
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("pin_"))
-async def pin_ad(callback: types.CallbackQuery):
-    ad_id = callback.data.split("_")[1]
-    conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("SELECT message_id FROM ads WHERE id = %s AND user_id = %s", (ad_id, callback.from_user.id))
-    result = cursor.fetchone(); cursor.close(); conn.close()
-    if result:
-        try:
-            await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=result[0], disable_notification=False)
-            await callback.message.edit_text("✅ Объявление закреплено в канале!")
-        except Exception as e: await callback.message.edit_text(f"❌ Ошибка: {e}")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("del_"))
@@ -444,10 +451,7 @@ async def main():
     await asyncio.sleep(3) 
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # Запускаем автоочистку в фоне
     asyncio.create_task(auto_clean_loop())
-    logging.info("Фоновая автоочистка запущена.")
-
     polling_task = asyncio.create_task(dp.start_polling(bot))
     
     app = web.Application()

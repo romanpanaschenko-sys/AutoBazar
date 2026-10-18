@@ -35,6 +35,7 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # Добавили поле username в таблицу объявлений
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
                 id SERIAL PRIMARY KEY, 
@@ -46,6 +47,7 @@ def init_db():
                 photo_id TEXT, 
                 message_id BIGINT, 
                 car_info TEXT,
+                username TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -62,6 +64,7 @@ def init_db():
         ''')
         try:
             cursor.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS car_info TEXT;")
+            cursor.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS username TEXT;") # <-- Новая колонка
             cursor.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
             cursor.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
         except Exception:
@@ -326,10 +329,14 @@ async def process_price(message: types.Message, state: FSMContext):
             except: 
                 pass
 
+        # Получаем юзернейм (если есть)
+        user_username = message.from_user.username if message.from_user.username else ""
+
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO ads (user_id, category, name, oem, price, photo_id, message_id, car_info) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", 
-                       (message.from_user.id, data['category'], data['name'], data['oem'], message.text, data['photo_id'], sent_msg.message_id, data['car_info']))
+        # Сохраняем username в базу
+        cursor.execute("INSERT INTO ads (user_id, category, name, oem, price, photo_id, message_id, car_info, username) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)", 
+                       (message.from_user.id, data['category'], data['name'], data['oem'], message.text, data['photo_id'], sent_msg.message_id, data['car_info'], user_username))
         conn.commit()
         cursor.close()
         conn.close()
@@ -454,6 +461,7 @@ async def api_ads(request):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # Добавили username в запрос
         cursor.execute("""
             SELECT 
                 id, 
@@ -463,7 +471,8 @@ async def api_ads(request):
                 COALESCE(category, 'Другое'), 
                 user_id, 
                 photo_id, 
-                COALESCE(car_info, 'Авто не указано') 
+                COALESCE(car_info, 'Авто не указано'),
+                COALESCE(username, '') 
             FROM ads ORDER BY id DESC LIMIT 50
         """)
         rows = cursor.fetchall()
@@ -484,7 +493,8 @@ async def api_ads(request):
                 "category": row[4], 
                 "user_id": row[5] if row[5] else 0, 
                 "photo_url": photo_url, 
-                "car_info": row[7]
+                "car_info": row[7],
+                "username": row[8] # <-- Передаем в Mini App
             })
         return web.json_response(ads_list, headers={'Access-Control-Allow-Origin': '*'})
     except Exception as e:

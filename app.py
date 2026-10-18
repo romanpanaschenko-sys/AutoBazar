@@ -1,7 +1,8 @@
 import asyncio
 import logging
 import os
-import sqlite3
+import psycopg2
+from urllib.parse import urlparse
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -12,31 +13,44 @@ from aiogram.fsm.state import State, StatesGroup
 
 TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if not TOKEN or not CHANNEL_ID:
-    raise ValueError("Заданы не все переменные окружения!")
+if not TOKEN or not CHANNEL_ID or not DATABASE_URL:
+    raise ValueError("Заданы не все переменные окружения! Проверьте BOT_TOKEN, CHANNEL_ID и DATABASE_URL")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- БАЗА ДАННЫХ ---
+# --- ПОДКЛЮЧЕНИЕ К POSTGRESQL ---
+def get_db_connection():
+    # Render выдает ссылки, начинающиеся с postgres://, но psycopg2 требует postgresql://
+    url = DATABASE_URL
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return psycopg2.connect(url)
+
 def init_db():
-    conn = sqlite3.connect('auto_bazar.db')
-    cursor = conn.cursor()
-    # Добавили поле category
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            category TEXT,
-            name TEXT,
-            oem TEXT,
-            price TEXT,
-            photo_id TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # В PostgreSQL автоинкремент называется SERIAL, а user_id может быть очень большим (BIGINT)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ads (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                category TEXT,
+                name TEXT,
+                oem TEXT,
+                price TEXT,
+                photo_id TEXT
+            )
+        ''')
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logging.info("База данных PostgreSQL успешно инициализирована.")
+    except Exception as e:
+        logging.error(f"Ошибка инициализации БД: {e}")
 
 # --- СОСТОЯНИЯ ---
 class AddAdState(StatesGroup):
@@ -64,12 +78,12 @@ def get_category_menu():
     builder.button(text="🚪 Кузов", callback_data="cat_Кузов")
     builder.button(text="🔌 Электрика", callback_data="cat_Электрика")
     builder.button(text="📦 Другое", callback_data="cat_Другое")
-    builder.adjust(2) # По две кнопки в ряд
+    builder.adjust(2)
     return builder.as_markup()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear() # <--- ВОТ ЭТА СТРОКА СБРАСЫВАЕТ ВСЕ ШАГИ
+    await state.clear() # Сбрасываем старые шаги
     await message.answer(
         "🚗 Привет! Добро пожаловать в авто-барахолку.\n"
         "Выбери действие в меню ниже:",
@@ -127,13 +141,20 @@ async def process_price(message: types.Message, state: FSMContext):
     photo_id = data['photo_id']
     user_id = message.from_user.id
     
-    # Сохраняем в БД
-    conn = sqlite3.connect('auto_bazar.db')
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO ads (user_id, category, name, oem, price, photo_id) VALUES (?, ?, ?, ?, ?, ?)", 
-                   (user_id, category, name, oem, price, photo_id))
-    conn.commit()
-    conn.close()
+    # Сохраняем в PostgreSQL (используем %s вместо ?)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO ads (user_id, category, name, oem, price, photo_id) VALUES (%s, %s, %s, %s, %s, %s)", 
+            (user_id, category, name, oem, price, photo_id)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        await message.answer(f"❌ Ошибка сохранения в БД: {e}")
+        return
     
     # Формируем пост
     post_text = (
@@ -143,7 +164,6 @@ async def process_price(message: types.Message, state: FSMContext):
         f"💰 **Цена:** {price} грн"
     )
     
-    # Кнопка связи с продавцом
     contact_btn = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={user_id}")]
     ])
@@ -167,22 +187,31 @@ async def start_search(callback: types.CallbackQuery, state: FSMContext):
 async def process_search(message: types.Message, state: FSMContext):
     search_query = message.text.strip().upper()
     
-    conn = sqlite3.connect('auto_bazar.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT name, oem, price, photo_id, category, user_id FROM ads WHERE UPPER(REPLACE(REPLACE(oem, ' ', ''), '-', '')) LIKE ?", (f"%{search_query}%",))
-    results = cursor.fetchall()
-    conn.close()
-    
-    if results:
-        await message.answer(f"Найдено {len(results)} объявлений:")
-        for res in results:
-            contact_btn = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={res[5]}")]
-            ])
-            caption = f"📂 {res[4]}\n⚙️ {res[0]}\n🔍 OEM: {res[1]}\n💰 Цена: {res[2]} грн"
-            await message.answer_photo(photo=res[3], caption=caption, reply_markup=contact_btn)
-    else:
-        await message.answer("По этому номеру ничего не найдено. 😔")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # Запрос для PostgreSQL (%s)
+        cursor.execute(
+            "SELECT name, oem, price, photo_id, category, user_id FROM ads WHERE UPPER(REPLACE(REPLACE(oem, ' ', ''), '-', '')) LIKE %s", 
+            (f"%{search_query}%",)
+        )
+        results = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        if results:
+            await message.answer(f"Найдено {len(results)} объявлений:")
+            for res in results:
+                contact_btn = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={res[5]}")]
+                ])
+                caption = f"📂 {res[4]}\n⚙️ {res[0]}\n🔍 OEM: {res[1]}\n💰 Цена: {res[2]} грн"
+                await message.answer_photo(photo=res[3], caption=caption, reply_markup=contact_btn)
+        else:
+            await message.answer("По этому номеру ничего не найдено. 😔")
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка поиска: {e}")
         
     await message.answer("Вернуться в меню:", reply_markup=get_main_menu())
     await state.clear()
@@ -205,7 +234,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 5000)))
     await site.start()
     
-    logging.info("Бот с категориями и кнопкой связи запущен!")
+    logging.info("Бот с PostgreSQL запущен!")
     await polling_task
 
 if __name__ == "__main__":

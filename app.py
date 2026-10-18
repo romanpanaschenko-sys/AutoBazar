@@ -31,22 +31,25 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # Таблица для продажи
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
                 id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                category TEXT,
-                name TEXT,
-                oem TEXT,
-                price TEXT,
-                photo_id TEXT,
-                message_id BIGINT
+                user_id BIGINT, category TEXT, name TEXT, oem TEXT, 
+                price TEXT, photo_id TEXT, message_id BIGINT
+            )
+        ''')
+        # Новая таблица для запросов (Куплю)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS requests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT, description TEXT, oem TEXT, 
+                budget TEXT, message_id BIGINT
             )
         ''')
         conn.commit()
         cursor.close()
         conn.close()
-        logging.info("База данных PostgreSQL инициализирована.")
     except Exception as e:
         logging.error(f"Ошибка инициализации БД: {e}")
 
@@ -57,6 +60,11 @@ class AddAdState(StatesGroup):
     waiting_for_name = State()
     waiting_for_oem = State()
     waiting_for_price = State()
+
+class WantedAdState(StatesGroup):
+    waiting_for_desc = State()
+    waiting_for_oem = State()
+    waiting_for_budget = State()
 
 class SearchState(StatesGroup):
     waiting_for_oem = State()
@@ -75,7 +83,8 @@ def generate_hashtags(category, name, oem):
 # --- КЛАВИАТУРЫ ---
 def get_main_menu():
     builder = InlineKeyboardBuilder()
-    builder.button(text="📦 Разместить объявление", callback_data="add_ad")
+    builder.button(text="📦 Продать запчасть", callback_data="add_ad")
+    builder.button(text="🔎 Куплю запчасть (Запрос)", callback_data="wanted_ad")
     builder.button(text="🔍 Поиск по OEM", callback_data="search_oem")
     builder.button(text="👤 Мои объявления", callback_data="my_ads")
     builder.adjust(1)
@@ -100,9 +109,26 @@ async def cmd_start(message: types.Message, state: FSMContext):
         reply_markup=get_main_menu()
     )
 
-# --- ДОБАВЛЕНИЕ ---
+# ==================== ДОБАВЛЕНИЕ ПРОДАЖИ ====================
 @dp.callback_query(F.data == "add_ad")
 async def start_add_ad(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM ads WHERE user_id = %s", (user_id,))
+        count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        
+        # Лимит 15 объявлений
+        if count >= 15:
+            await callback.message.answer("⚠️ У вас уже 15 активных объявлений. Удалите старые в разделе «Мои объявления», чтобы добавить новые.")
+            await callback.answer()
+            return
+    except Exception:
+        pass
+
     await callback.message.answer("📸 Шаг 1: Отправьте фотографию запчасти:")
     await state.set_state(AddAdState.waiting_for_photo)
     await callback.answer()
@@ -142,138 +168,119 @@ async def process_oem(message: types.Message, state: FSMContext):
 @dp.message(AddAdState.waiting_for_price)
 async def process_price(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    name = data['name']
-    oem = data['oem']
-    category = data['category']
-    price = message.text
-    photo_id = data['photo_id']
-    user_id = message.from_user.id
+    tags = generate_hashtags(data['category'], data['name'], data['oem'])
+    post_text = (f"📂 **Категория:** {data['category']}\n⚙️ **{data['name']}**\n\n"
+                 f"🔍 **OEM:** `{data['oem']}`\n💰 **Цена:** {message.text} грн\n\n{tags}")
     
-    tags = generate_hashtags(category, name, oem)
-    post_text = (
-        f"📂 **Категория:** {category}\n"
-        f"⚙️ **{name}**\n\n"
-        f"🔍 **OEM:** `{oem}`\n"
-        f"💰 **Цена:** {price} грн\n\n"
-        f"{tags}"
-    )
-    
-    contact_btn = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={user_id}")]
-    ])
+    contact_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={message.from_user.id}")]])
     
     try:
-        sent_msg = await bot.send_photo(
-            chat_id=CHANNEL_ID, photo=photo_id, caption=post_text, 
-            parse_mode="Markdown", reply_markup=contact_btn
-        )
-        message_id = sent_msg.message_id
-        
+        sent_msg = await bot.send_photo(chat_id=CHANNEL_ID, photo=data['photo_id'], caption=post_text, parse_mode="Markdown", reply_markup=contact_btn)
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO ads (user_id, category, name, oem, price, photo_id, message_id) VALUES (%s, %s, %s, %s, %s, %s, %s)", 
-            (user_id, category, name, oem, price, photo_id, message_id)
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        await message.answer("✅ Объявление опубликовано в канале!", reply_markup=get_main_menu())
+        cursor.execute("INSERT INTO ads (user_id, category, name, oem, price, photo_id, message_id) VALUES (%s, %s, %s, %s, %s, %s, %s)", 
+                       (message.from_user.id, data['category'], data['name'], data['oem'], message.text, data['photo_id'], sent_msg.message_id))
+        conn.commit(); cursor.close(); conn.close()
+        await message.answer("✅ Объявление опубликовано!", reply_markup=get_main_menu())
     except Exception as e:
-        await message.answer(f"❌ Ошибка публикации: {e}", reply_markup=get_main_menu())
+        await message.answer(f"❌ Ошибка: {e}", reply_markup=get_main_menu())
     await state.clear()
 
-# --- МОИ ОБЪЯВЛЕНИЯ ---
+# ==================== ЗАПРОС (КУПЛЮ) ====================
+@dp.callback_query(F.data == "wanted_ad")
+async def start_wanted_ad(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.answer("📝 Опишите, какую запчасть вы ищете (марка, модель, деталь):")
+    await state.set_state(WantedAdState.waiting_for_desc)
+    await callback.answer()
+
+@dp.message(WantedAdState.waiting_for_desc)
+async def wanted_desc(message: types.Message, state: FSMContext):
+    await state.update_data(desc=message.text)
+    await message.answer("🔍 Введите OEM-номер (если знаете) или напишите 'нет':")
+    await state.set_state(WantedAdState.waiting_for_oem)
+
+@dp.message(WantedAdState.waiting_for_oem)
+async def wanted_oem(message: types.Message, state: FSMContext):
+    await state.update_data(oem=message.text)
+    await message.answer("💰 Укажите ваш бюджет в грн (или напишите 'договорная'):")
+    await state.set_state(WantedAdState.waiting_for_budget)
+
+@dp.message(WantedAdState.waiting_for_budget)
+async def wanted_budget(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    post_text = (f"🔎 **КУПЛЮ ЗАПЧАСТЬ**\n\n"
+                 f"📝 **Описание:** {data['desc']}\n"
+                 f"🔍 **OEM:** `{data['oem']}`\n"
+                 f"💰 **Бюджет:** {message.text} грн\n\n"
+                 f"#Куплю #Запрос #АвтоБарахолка")
+    
+    contact_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Предложить деталь", url=f"tg://user?id={message.from_user.id}")]])
+    
+    try:
+        # Для запросов отправляем текстовое сообщение без фото
+        sent_msg = await bot.send_message(chat_id=CHANNEL_ID, text=post_text, parse_mode="Markdown", reply_markup=contact_btn)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO requests (user_id, description, oem, budget, message_id) VALUES (%s, %s, %s, %s, %s)", 
+                       (message.from_user.id, data['desc'], data['oem'], message.text, sent_msg.message_id))
+        conn.commit(); cursor.close(); conn.close()
+        await message.answer("✅ Ваш запрос опубликован! Продавцы скоро свяжутся с вами.", reply_markup=get_main_menu())
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}", reply_markup=get_main_menu())
+    await state.clear()
+
+# ==================== ОСТАЛЬНОЕ (МОИ ОБЪЯВЛЕНИЯ, ПОИСК, VIP) ====================
 @dp.callback_query(F.data == "my_ads")
 async def show_my_ads(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, name, price FROM ads WHERE user_id = %s", (user_id,))
+        cursor.execute("SELECT id, name, price FROM ads WHERE user_id = %s", (callback.from_user.id,))
         results = cursor.fetchall()
-        cursor.close()
-        conn.close()
+        cursor.close(); conn.close()
         
         if not results:
-            await callback.message.answer("У вас пока нет объявлений.")
-            return
-
-        await callback.message.answer("Ваши объявления (доступные действия под каждым):")
-        for res in results:
-            ad_id, name, price = res
-            
-            # Теперь две кнопки в ряд: Удалить и Закрепить
-            buttons = InlineKeyboardMarkup(inline_keyboard=[
-                [
+            await callback.message.answer("У вас пока нет объявлений о продаже.")
+        else:
+            await callback.message.answer("Ваши объявления на продажу:")
+            for ad_id, name, price in results:
+                buttons = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(text="⭐ Закрепить", callback_data=f"pin_{ad_id}"),
                     InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{ad_id}")
-                ]
-            ])
-            await callback.message.answer(f"⚙️ {name}\n💰 {price} грн", reply_markup=buttons)
+                ]])
+                await callback.message.answer(f"⚙️ {name}\n💰 {price} грн", reply_markup=buttons)
     except Exception as e:
         await callback.message.answer(f"Ошибка: {e}")
     await callback.answer()
 
-# --- ЗАКРЕПЛЕНИЕ В КАНАЛЕ (VIP) ---
 @dp.callback_query(F.data.startswith("pin_"))
 async def pin_ad(callback: types.CallbackQuery):
     ad_id = callback.data.split("_")[1]
-    user_id = callback.from_user.id
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT message_id FROM ads WHERE id = %s AND user_id = %s", (ad_id, user_id))
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        
-        if result:
-            message_id = result[0]
-            try:
-                # Закрепляем сообщение в канале
-                await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=message_id, disable_notification=False)
-                await callback.message.edit_text("✅ Объявление успешно закреплено в канале!")
-            except Exception as e:
-                await callback.message.edit_text(f"❌ Не удалось закрепить: {e}")
-        else:
-            await callback.message.edit_text("⚠️ Объявление не найдено.")
-    except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка: {e}")
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT message_id FROM ads WHERE id = %s AND user_id = %s", (ad_id, callback.from_user.id))
+    result = cursor.fetchone(); cursor.close(); conn.close()
+    if result:
+        try:
+            await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=result[0], disable_notification=False)
+            await callback.message.edit_text("✅ Объявление закреплено в канале!")
+        except Exception as e: await callback.message.edit_text(f"❌ Ошибка: {e}")
     await callback.answer()
 
-# --- УДАЛЕНИЕ ---
 @dp.callback_query(F.data.startswith("del_"))
 async def delete_ad(callback: types.CallbackQuery):
     ad_id = callback.data.split("_")[1]
-    user_id = callback.from_user.id
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT message_id FROM ads WHERE id = %s AND user_id = %s", (ad_id, user_id))
-        result = cursor.fetchone()
-        
-        if result:
-            message_id = result[0]
-            try:
-                await bot.delete_message(chat_id=CHANNEL_ID, message_id=message_id)
-            except Exception:
-                pass # Сообщение могло быть уже удалено вручную
-            
-            cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
-            conn.commit()
-            await callback.message.edit_text("✅ Объявление удалено из базы и канала.")
-        else:
-            await callback.message.edit_text("⚠️ Объявление не найдено.")
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка удаления: {e}")
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT message_id FROM ads WHERE id = %s AND user_id = %s", (ad_id, callback.from_user.id))
+    result = cursor.fetchone()
+    if result:
+        try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=result[0])
+        except: pass
+        cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
+        conn.commit()
+        await callback.message.edit_text("✅ Удалено.")
+    cursor.close(); conn.close()
     await callback.answer()
 
-# --- ПОИСК ---
 @dp.callback_query(F.data == "search_oem")
 async def start_search(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите OEM-номер для поиска:")
@@ -284,30 +291,20 @@ async def start_search(callback: types.CallbackQuery, state: FSMContext):
 async def process_search(message: types.Message, state: FSMContext):
     search_query = message.text.strip().upper()
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT name, oem, price, photo_id, category, user_id FROM ads WHERE UPPER(REPLACE(REPLACE(oem, ' ', ''), '-', '')) LIKE %s", 
-            (f"%{search_query}%",)
-        )
-        results = cursor.fetchall()
-        cursor.close()
-        conn.close()
+        conn = get_db_connection(); cursor = conn.cursor()
+        cursor.execute("SELECT name, oem, price, photo_id, category, user_id FROM ads WHERE UPPER(REPLACE(REPLACE(oem, ' ', ''), '-', '')) LIKE %s", (f"%{search_query}%",))
+        results = cursor.fetchall(); cursor.close(); conn.close()
         
         if results:
             await message.answer(f"Найдено {len(results)} объявлений:")
             for res in results:
-                contact_btn = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={res[5]}")]
-                ])
+                btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={res[5]}")]])
                 caption = f"📂 {res[4]}\n⚙️ {res[0]}\n🔍 OEM: {res[1]}\n💰 Цена: {res[2]} грн"
-                await message.answer_photo(photo=res[3], caption=caption, reply_markup=contact_btn)
+                await message.answer_photo(photo=res[3], caption=caption, reply_markup=btn)
         else:
-            await message.answer("По этому номеру ничего не найдено. 😔")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка поиска: {e}")
-        
-    await message.answer("Вернуться в меню:", reply_markup=get_main_menu())
+            await message.answer("Ничего не найдено. 😔")
+    except Exception as e: await message.answer(f"❌ Ошибка: {e}")
+    await message.answer("Меню:", reply_markup=get_main_menu())
     await state.clear()
 
 # --- ВЕБ-СЕРВЕР ---
@@ -318,7 +315,6 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
-    
     polling_task = asyncio.create_task(dp.start_polling(bot))
     
     app = web.Application()
@@ -327,8 +323,6 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 5000)))
     await site.start()
-    
-    logging.info("Бот с VIP-закреплением запущен!")
     await polling_task
 
 if __name__ == "__main__":

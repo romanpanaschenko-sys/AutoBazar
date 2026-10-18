@@ -15,7 +15,7 @@ TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GROUP_ID = os.environ.get("GROUP_ID")
-ADMIN_ID = 1087968824  # <--- ТВОЙ ID ВЛАДЕЛЬЦА
+ADMIN_ID = 1087968824  # Твой ID без минуса
 
 if not TOKEN or not CHANNEL_ID or not DATABASE_URL:
     raise ValueError("Заданы не все переменные окружения!")
@@ -401,7 +401,7 @@ async def health_check(request):
 async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
-    await asyncio.sleep(3) # <--- Защита от конфликта при перезапуске
+    await asyncio.sleep(3) # Защита от конфликта при перезапуске
     await bot.delete_webhook(drop_pending_updates=True)
     polling_task = asyncio.create_task(dp.start_polling(bot))
     

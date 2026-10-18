@@ -24,7 +24,7 @@ if not TOKEN or not CHANNEL_ID or not DATABASE_URL:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- ПОДКЛЮЧЕНИЕ К POSTGRESQL ---
+# --- БАЗА ДАННЫХ ---
 def get_db_connection():
     url = DATABASE_URL
     if url.startswith("postgres://"):
@@ -37,19 +37,15 @@ def init_db():
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT, category TEXT, name TEXT, oem TEXT, 
-                price TEXT, photo_id TEXT, message_id BIGINT,
-                car_info TEXT,
+                id SERIAL PRIMARY KEY, user_id BIGINT, category TEXT, name TEXT, oem TEXT, 
+                price TEXT, photo_id TEXT, message_id BIGINT, car_info TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS requests (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT, description TEXT, oem TEXT, 
-                budget TEXT, message_id BIGINT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                id SERIAL PRIMARY KEY, user_id BIGINT, description TEXT, oem TEXT, 
+                budget TEXT, message_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         try:
@@ -58,38 +54,27 @@ def init_db():
             cursor.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
         except Exception:
             conn.rollback()
-
-        conn.commit()
-        cursor.close()
-        conn.close()
+        conn.commit(); cursor.close(); conn.close()
     except Exception as e:
-        logging.error(f"Ошибка инициализации БД: {e}")
+        logging.error(f"Ошибка БД: {e}")
 
-# --- ФОНОВАЯ АВТООЧИСТКА (Раз в час) ---
+# --- АВТООЧИСТКА ---
 async def auto_clean_loop():
     while True:
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
+            conn = get_db_connection(); cursor = conn.cursor()
             cursor.execute("SELECT id, message_id FROM ads WHERE created_at < NOW() - INTERVAL '30 days'")
-            old_ads = cursor.fetchall()
-            for ad_id, msg_id in old_ads:
+            for ad_id, msg_id in cursor.fetchall():
                 try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
                 except: pass
                 cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
-
             cursor.execute("SELECT id, message_id FROM requests WHERE created_at < NOW() - INTERVAL '30 days'")
-            old_reqs = cursor.fetchall()
-            for req_id, msg_id in old_reqs:
+            for req_id, msg_id in cursor.fetchall():
                 try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
                 except: pass
                 cursor.execute("DELETE FROM requests WHERE id = %s", (req_id,))
-
-            conn.commit()
-            cursor.close()
-            conn.close()
-        except Exception as e:
-            logging.error(f"Ошибка в автоочистке: {e}")
+            conn.commit(); cursor.close(); conn.close()
+        except Exception as e: logging.error(f"Ошибка автоочистки: {e}")
         await asyncio.sleep(3600)
 
 # --- СОСТОЯНИЯ ---
@@ -109,71 +94,50 @@ class WantedAdState(StatesGroup):
 class SearchState(StatesGroup):
     waiting_for_oem = State()
 
-# --- ХЭШТЕГИ ---
-def generate_hashtags(category, name, oem, car_info):
-    cat_tag = "#" + "".join(c for c in category if c.isalnum())
-    first_word = name.split()[0] if name else "Деталь"
-    name_tag = "#" + "".join(c for c in first_word if c.isalnum())
-    car_tag = "#" + "".join(c for c in car_info.split()[0] if c.isalnum()) if car_info else ""
-    tags = f"{cat_tag} {name_tag} {car_tag} #АвтоБарахолка"
-    if oem.lower() != "нет" and oem.strip():
-        oem_tag = "#" + "".join(c for c in oem if c.isalnum())
-        tags += f" {oem_tag}"
-    return tags
-
 # --- КЛАВИАТУРЫ ---
 def get_main_menu():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📦 Продать запчасть", callback_data="add_ad")
-    builder.button(text="🔎 Куплю запчасть (Запрос)", callback_data="wanted_ad")
-    builder.button(text="🔍 Поиск по OEM", callback_data="search_oem")
-    builder.button(text="👤 Мои объявления", callback_data="my_ads")
-    builder.adjust(1)
-    return builder.as_markup()
+    b = InlineKeyboardBuilder()
+    b.button(text="📦 Продать запчасть", callback_data="add_ad")
+    b.button(text="🔎 Куплю запчасть (Запрос)", callback_data="wanted_ad")
+    b.button(text="🔍 Поиск по OEM", callback_data="search_oem")
+    b.button(text="👤 Мои объявления", callback_data="my_ads")
+    b.adjust(1)
+    return b.as_markup()
 
 def get_category_menu():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⚙️ Двигатель", callback_data="cat_Двигатель")
-    builder.button(text="🛞 Подвеска", callback_data="cat_Подвеска")
-    builder.button(text="🚪 Кузов", callback_data="cat_Кузов")
-    builder.button(text="🔌 Электрика", callback_data="cat_Электрика")
-    builder.button(text="📦 Другое", callback_data="cat_Другое")
-    builder.adjust(2)
-    return builder.as_markup()
+    b = InlineKeyboardBuilder()
+    b.button(text="⚙️ Двигатель", callback_data="cat_Двигатель")
+    b.button(text="🛞 Подвеска", callback_data="cat_Подвеска")
+    b.button(text="🚪 Кузов", callback_data="cat_Кузов")
+    b.button(text="🔌 Электрика", callback_data="cat_Электрика")
+    b.button(text="📦 Другое", callback_data="cat_Другое")
+    b.adjust(2)
+    return b.as_markup()
 
 def get_admin_menu():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📊 Статистика", callback_data="admin_stats")
-    builder.button(text="🗑 Удалить последнее объявление", callback_data="admin_del_ad")
-    builder.button(text="🗑 Удалить последний запрос", callback_data="admin_del_req")
-    builder.adjust(1)
-    return builder.as_markup()
+    b = InlineKeyboardBuilder()
+    b.button(text="📊 Статистика", callback_data="admin_stats")
+    b.button(text="🗑 Удалить последнее объявление", callback_data="admin_del_ad")
+    b.button(text="🗑 Удалить последний запрос", callback_data="admin_del_req")
+    b.adjust(1)
+    return b.as_markup()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "🚗 Привет! Добро пожаловать в авто-барахолку.\n"
-        "Выбери действие в меню ниже:",
-        reply_markup=get_main_menu()
-    )
+    await message.answer("🚗 Привет! Добро пожаловать в авто-барахолку.\nВыбери действие:", reply_markup=get_main_menu())
 
-# ==================== ОПЛАТА ЗВЕЗДАМИ И VIP ====================
+# ==================== ОПЛАТА И VIP ====================
 @dp.callback_query(F.data.startswith("pin_"))
 async def pin_ad_invoice(callback: types.CallbackQuery):
     ad_id = callback.data.split("_")[1]
     conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT message_id FROM ads WHERE id = %s AND user_id = %s", (ad_id, callback.from_user.id))
     result = cursor.fetchone(); cursor.close(); conn.close()
-    
     if result:
         await bot.send_invoice(
-            chat_id=callback.from_user.id,
-            title="Закрепление объявления",
-            description="Ваше объявление будет закреплено в самом верху канала на 24 часа.",
-            payload=f"pin_{ad_id}_{result[0]}",
-            provider_token="",
-            currency="XTR",
+            chat_id=callback.from_user.id, title="Закрепление", description="Закреп на 24 часа.",
+            payload=f"pin_{ad_id}_{result[0]}", provider_token="", currency="XTR",
             prices=[LabeledPrice(label="Закрепление", amount=50)],
         )
     await callback.answer()
@@ -184,155 +148,115 @@ async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery)
 
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: types.Message):
-    payload = message.successful_payment.invoice_payload
-    _, ad_id, msg_id = payload.split("_")
+    _, ad_id, msg_id = message.successful_payment.invoice_payload.split("_")
     try:
-        await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=int(msg_id), disable_notification=False)
-        await message.answer("✅ Оплата прошла успешно! Ваше объявление закреплено на 24 часа.")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка закрепления: {e}")
+        await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=int(msg_id))
+        await message.answer("✅ Оплата прошла! Объявление закреплено.")
+    except Exception as e: await message.answer(f"❌ Ошибка: {e}")
 
-# ==================== АДМИН-ПАНЕЛЬ ====================
+# ==================== АДМИН ====================
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer(f"⛔ Доступ запрещен. Ваш ID: `{message.from_user.id}`", parse_mode="Markdown")
-        return
+    if message.from_user.id != ADMIN_ID: return
     await message.answer("👑 Панель администратора:", reply_markup=get_admin_menu())
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
-    try:
-        conn = get_db_connection(); cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM ads")
-        ads_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM requests")
-        req_count = cursor.fetchone()[0]
-        cursor.close(); conn.close()
-        await callback.message.edit_text(f"📊 **Статистика:**\n\n📦 Объявлений: {ads_count}\n🔎 Запросов: {req_count}", parse_mode="Markdown", reply_markup=get_admin_menu())
-    except Exception as e:
-        await callback.message.edit_text(f"Ошибка: {e}", reply_markup=get_admin_menu())
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM ads"); ads_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM requests"); req_count = cursor.fetchone()[0]
+    cursor.close(); conn.close()
+    await callback.message.edit_text(f"📊 **Статистика:**\n\n📦 Объявлений: {ads_count}\n🔎 Запросов: {req_count}", parse_mode="Markdown", reply_markup=get_admin_menu())
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_del_ad")
 async def admin_del_ad(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
-    try:
-        conn = get_db_connection(); cursor = conn.cursor()
-        cursor.execute("SELECT id, message_id, name FROM ads ORDER BY id DESC LIMIT 1")
-        result = cursor.fetchone()
-        if result:
-            ad_id, msg_id, name = result
-            try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
-            except: pass
-            cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
-            conn.commit()
-            await callback.message.edit_text(f"✅ Объявление «{name}» удалено.", reply_markup=get_admin_menu())
-        else:
-            await callback.message.edit_text("В базе нет объявлений.", reply_markup=get_admin_menu())
-        cursor.close(); conn.close()
-    except Exception as e:
-        await callback.message.edit_text(f"Ошибка: {e}", reply_markup=get_admin_menu())
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT id, message_id FROM ads ORDER BY id DESC LIMIT 1"); result = cursor.fetchone()
+    if result:
+        try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=result[1])
+        except: pass
+        cursor.execute("DELETE FROM ads WHERE id = %s", (result[0],)); conn.commit()
+    cursor.close(); conn.close()
+    await callback.message.edit_text("✅ Удалено.", reply_markup=get_admin_menu())
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_del_req")
 async def admin_del_req(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID: return
-    try:
-        conn = get_db_connection(); cursor = conn.cursor()
-        cursor.execute("SELECT id, message_id FROM requests ORDER BY id DESC LIMIT 1")
-        result = cursor.fetchone()
-        if result:
-            req_id, msg_id = result
-            try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
-            except: pass
-            cursor.execute("DELETE FROM requests WHERE id = %s", (req_id,))
-            conn.commit()
-            await callback.message.edit_text("✅ Запрос удален.", reply_markup=get_admin_menu())
-        else:
-            await callback.message.edit_text("В базе нет запросов.", reply_markup=get_admin_menu())
-        cursor.close(); conn.close()
-    except Exception as e:
-        await callback.message.edit_text(f"Ошибка: {e}", reply_markup=get_admin_menu())
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT id, message_id FROM requests ORDER BY id DESC LIMIT 1"); result = cursor.fetchone()
+    if result:
+        try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=result[1])
+        except: pass
+        cursor.execute("DELETE FROM requests WHERE id = %s", (result[0],)); conn.commit()
+    cursor.close(); conn.close()
+    await callback.message.edit_text("✅ Удалено.", reply_markup=get_admin_menu())
     await callback.answer()
 
-# ==================== ДОБАВЛЕНИЕ ПРОДАЖИ ====================
+# ==================== ДОБАВЛЕНИЕ ====================
 @dp.callback_query(F.data == "add_ad")
 async def start_add_ad(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    try:
-        conn = get_db_connection(); cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM ads WHERE user_id = %s", (user_id,))
-        count = cursor.fetchone()[0]
-        cursor.close(); conn.close()
-        if count >= 15:
-            await callback.message.answer("⚠️ У вас уже 15 активных объявлений. Удалите старые в разделе «Мои объявления».")
-            await callback.answer()
-            return
-    except Exception: pass
-
-    await callback.message.answer("📸 Шаг 1: Отправьте фотографию запчасти:")
-    await state.set_state(AddAdState.waiting_for_photo)
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM ads WHERE user_id = %s", (callback.from_user.id,)); count = cursor.fetchone()[0]
+    cursor.close(); conn.close()
+    if count >= 15:
+        await callback.message.answer("⚠️ У вас 15 активных объявлений. Удалите старые.")
+    else:
+        await callback.message.answer("📸 Шаг 1: Отправьте фотографию:")
+        await state.set_state(AddAdState.waiting_for_photo)
     await callback.answer()
 
 @dp.message(AddAdState.waiting_for_photo, F.photo)
 async def process_photo(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    
-    # Защита от альбомов: если фото уже сохранено, игнорируем остальные
-    if 'photo_id' in data:
-        return
-
-    photo_id = message.photo[-1].file_id
-    await state.update_data(photo_id=photo_id)
-    
-    await message.answer("🚘 Шаг 2: Для какого авто эта деталь? (Напишите марку, модель, кузов и год. Например: BMW X5 E43 2009):")
+    if 'photo_id' in data: return # Игнорируем альбомы
+    await state.update_data(photo_id=message.photo[-1].file_id)
+    await message.answer("🚘 Шаг 2: Для какого авто? (BMW X5 E43 2009):")
     await state.set_state(AddAdState.waiting_for_car_info)
 
 @dp.message(AddAdState.waiting_for_photo)
 async def process_photo_error(message: types.Message):
-    await message.answer("⚠️ Пожалуйста, отправьте именно фотографию (нажмите на скрепку).")
+    await message.answer("⚠️ Отправьте именно фотографию.")
 
 @dp.message(AddAdState.waiting_for_car_info, F.photo)
 async def process_car_info_photo_error(message: types.Message):
-    await message.answer("⚠️ Фото уже принято. Пожалуйста, напишите текстом: марку, модель, кузов и год (например, BMW X5 E43 2009).")
+    await message.answer("⚠️ Фото уже принято. Напишите текстом (BMW X5...).")
 
 @dp.message(AddAdState.waiting_for_car_info)
 async def process_car_info(message: types.Message, state: FSMContext):
     await state.update_data(car_info=message.text)
-    await message.answer("📂 Шаг 3: Выберите категорию запчасти:", reply_markup=get_category_menu())
+    await message.answer("📂 Шаг 3: Выберите категорию:", reply_markup=get_category_menu())
     await state.set_state(AddAdState.waiting_for_category)
 
 @dp.callback_query(AddAdState.waiting_for_category, F.data.startswith("cat_"))
 async def process_category(callback: types.CallbackQuery, state: FSMContext):
     category = callback.data.split("_")[1]
     await state.update_data(category=category)
-    await callback.message.edit_text(f"Категория выбрана: {category}")
-    await callback.message.answer("📝 Шаг 4: Введите название детали (например: Стартер, Фара):")
+    await callback.message.edit_text(f"Категория: {category}")
+    await callback.message.answer("📝 Шаг 4: Название детали:")
     await state.set_state(AddAdState.waiting_for_name)
     await callback.answer()
 
 @dp.message(AddAdState.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text)
-    await message.answer("🔍 Шаг 5: Введите OEM-номер (или напишите 'нет'):")
+    await message.answer("🔍 Шаг 5: OEM-номер (или 'нет'):")
     await state.set_state(AddAdState.waiting_for_oem)
 
 @dp.message(AddAdState.waiting_for_oem)
 async def process_oem(message: types.Message, state: FSMContext):
     await state.update_data(oem=message.text)
-    await message.answer("💰 Шаг 6: Введите цену в грн:")
+    await message.answer("💰 Шаг 6: Цена в грн:")
     await state.set_state(AddAdState.waiting_for_price)
 
 @dp.message(AddAdState.waiting_for_price)
 async def process_price(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    tags = generate_hashtags(data['category'], data['name'], data['oem'], data['car_info'])
-    
-    post_text = (f"🚘 **Авто:** {data['car_info']}\n"
-                 f"📂 **Категория:** {data['category']}\n⚙️ **{data['name']}**\n\n"
-                 f"🔍 **OEM:** `{data['oem']}`\n💰 **Цена:** {message.text} грн\n\n{tags}")
+    post_text = (f"🚘 **Авто:** {data['car_info']}\n📂 **Категория:** {data['category']}\n⚙️ **{data['name']}**\n\n"
+                 f"🔍 **OEM:** `{data['oem']}`\n💰 **Цена:** {message.text} грн\n\n#АвтоБарахолка")
     
     contact_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={message.from_user.id}")]])
     
@@ -340,82 +264,67 @@ async def process_price(message: types.Message, state: FSMContext):
         sent_msg = await bot.send_photo(chat_id=CHANNEL_ID, photo=data['photo_id'], caption=post_text, parse_mode="Markdown", reply_markup=contact_btn)
         if GROUP_ID:
             try: await bot.send_message(chat_id=GROUP_ID, text=f"🆕 **Новое объявление!**\n\n{post_text}", parse_mode="Markdown")
-            except Exception: pass
+            except: pass
 
         conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("INSERT INTO ads (user_id, category, name, oem, price, photo_id, message_id, car_info) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", 
                        (message.from_user.id, data['category'], data['name'], data['oem'], message.text, data['photo_id'], sent_msg.message_id, data['car_info']))
         conn.commit(); cursor.close(); conn.close()
-        await message.answer("✅ Объявление опубликовано в канале!", reply_markup=get_main_menu())
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}", reply_markup=get_main_menu())
+        await message.answer("✅ Опубликовано!", reply_markup=get_main_menu())
+    except Exception as e: await message.answer(f"❌ Ошибка: {e}", reply_markup=get_main_menu())
     await state.clear()
 
-# ==================== ЗАПРОС (КУПЛЮ) ====================
+# ==================== ЗАПРОС ====================
 @dp.callback_query(F.data == "wanted_ad")
 async def start_wanted_ad(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("📝 Опишите, какую запчасть вы ищете (марка, модель, деталь):")
+    await callback.message.answer("📝 Опишите, что ищете:")
     await state.set_state(WantedAdState.waiting_for_desc)
     await callback.answer()
 
 @dp.message(WantedAdState.waiting_for_desc)
 async def wanted_desc(message: types.Message, state: FSMContext):
     await state.update_data(desc=message.text)
-    await message.answer("🔍 Введите OEM-номер (если знаете) или напишите 'нет':")
+    await message.answer("🔍 OEM (или 'нет'):")
     await state.set_state(WantedAdState.waiting_for_oem)
 
 @dp.message(WantedAdState.waiting_for_oem)
 async def wanted_oem(message: types.Message, state: FSMContext):
     await state.update_data(oem=message.text)
-    await message.answer("💰 Укажите ваш бюджет в грн (или напишите 'договорная'):")
+    await message.answer("💰 Бюджет (грн):")
     await state.set_state(WantedAdState.waiting_for_budget)
 
 @dp.message(WantedAdState.waiting_for_budget)
 async def wanted_budget(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    post_text = (f"🔎 **КУПЛЮ ЗАПЧАСТЬ**\n\n"
-                 f"📝 **Описание:** {data['desc']}\n"
-                 f"🔍 **OEM:** `{data['oem']}`\n"
-                 f"💰 **Бюджет:** {message.text} грн\n\n"
-                 f"#Куплю #Запрос #АвтоБарахолка")
-    
-    contact_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Предложить деталь", url=f"tg://user?id={message.from_user.id}")]])
-    
+    post_text = (f"🔎 **КУПЛЮ**\n\n📝 {data['desc']}\n🔍 OEM: `{data['oem']}`\n💰 Бюджет: {message.text} грн\n\n#Куплю")
+    contact_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Предложить", url=f"tg://user?id={message.from_user.id}")]])
     try:
         sent_msg = await bot.send_message(chat_id=CHANNEL_ID, text=post_text, parse_mode="Markdown", reply_markup=contact_btn)
         if GROUP_ID:
-            try: await bot.send_message(chat_id=GROUP_ID, text=f"🔔 **Новый запрос!**\n\n{post_text}", parse_mode="Markdown")
-            except Exception: pass
-
+            try: await bot.send_message(chat_id=GROUP_ID, text=f"🔔 **Запрос!**\n\n{post_text}", parse_mode="Markdown")
+            except: pass
         conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("INSERT INTO requests (user_id, description, oem, budget, message_id) VALUES (%s, %s, %s, %s, %s)", 
                        (message.from_user.id, data['desc'], data['oem'], message.text, sent_msg.message_id))
         conn.commit(); cursor.close(); conn.close()
-        await message.answer("✅ Ваш запрос опубликован!", reply_markup=get_main_menu())
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}", reply_markup=get_main_menu())
+        await message.answer("✅ Опубликовано!", reply_markup=get_main_menu())
+    except Exception as e: await message.answer(f"❌ Ошибка: {e}", reply_markup=get_main_menu())
     await state.clear()
 
-# ==================== МОИ ОБЪЯВЛЕНИЯ, ПОИСК ====================
+# ==================== МОИ И ПОИСК ====================
 @dp.callback_query(F.data == "my_ads")
 async def show_my_ads(callback: types.CallbackQuery):
-    try:
-        conn = get_db_connection(); cursor = conn.cursor()
-        cursor.execute("SELECT id, name, price FROM ads WHERE user_id = %s", (callback.from_user.id,))
-        results = cursor.fetchall(); cursor.close(); conn.close()
-        
-        if not results:
-            await callback.message.answer("У вас пока нет объявлений о продаже.")
-        else:
-            await callback.message.answer("Ваши объявления на продажу:")
-            for ad_id, name, price in results:
-                buttons = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="⭐ Закрепить (50 ⭐)", callback_data=f"pin_{ad_id}"),
-                    InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{ad_id}")
-                ]])
-                await callback.message.answer(f"⚙️ {name}\n💰 {price} грн", reply_markup=buttons)
-    except Exception as e:
-        await callback.message.answer(f"Ошибка: {e}")
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT id, name, price FROM ads WHERE user_id = %s", (callback.from_user.id,))
+    results = cursor.fetchall(); cursor.close(); conn.close()
+    if not results: await callback.message.answer("Нет объявлений.")
+    else:
+        for ad_id, name, price in results:
+            buttons = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⭐ VIP (50 ⭐)", callback_data=f"pin_{ad_id}"),
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{ad_id}")
+            ]])
+            await callback.message.answer(f"⚙️ {name}\n💰 {price} грн", reply_markup=buttons)
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("del_"))
@@ -427,72 +336,66 @@ async def delete_ad(callback: types.CallbackQuery):
     if result:
         try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=result[0])
         except: pass
-        cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
-        conn.commit()
+        cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,)); conn.commit()
         await callback.message.edit_text("✅ Удалено.")
     cursor.close(); conn.close()
     await callback.answer()
 
 @dp.callback_query(F.data == "search_oem")
 async def start_search(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Введите OEM-номер или название детали для поиска:")
+    await callback.message.answer("Введите OEM или название:")
     await state.set_state(SearchState.waiting_for_oem)
     await callback.answer()
 
 @dp.message(SearchState.waiting_for_oem)
 async def process_search(message: types.Message, state: FSMContext):
     search_query = message.text.strip().upper()
-    try:
-        conn = get_db_connection(); cursor = conn.cursor()
-        cursor.execute("SELECT name, oem, price, photo_id, category, user_id, car_info FROM ads WHERE UPPER(REPLACE(REPLACE(oem, ' ', ''), '-', '')) LIKE %s OR UPPER(name) LIKE %s", (f"%{search_query}%", f"%{search_query}%"))
-        results = cursor.fetchall(); cursor.close(); conn.close()
-        
-        if results:
-            await message.answer(f"Найдено {len(results)} объявлений:")
-            for res in results:
-                btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={res[5]}")]])
-                caption = f"🚘 {res[6]}\n📂 {res[4]}\n⚙️ {res[0]}\n🔍 OEM: {res[1]}\n💰 Цена: {res[2]} грн"
-                await message.answer_photo(photo=res[3], caption=caption, reply_markup=btn)
-        else:
-            await message.answer("Ничего не найдено. 😔")
-    except Exception as e: await message.answer(f"❌ Ошибка: {e}")
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT name, oem, price, photo_id, category, user_id, car_info FROM ads WHERE UPPER(REPLACE(REPLACE(oem, ' ', ''), '-', '')) LIKE %s OR UPPER(name) LIKE %s", (f"%{search_query}%", f"%{search_query}%"))
+    results = cursor.fetchall(); cursor.close(); conn.close()
+    if results:
+        await message.answer(f"Найдено {len(results)}:")
+        for res in results:
+            btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать", url=f"tg://user?id={res[5]}")]])
+            caption = f"🚘 {res[6]}\n📂 {res[4]}\n⚙️ {res[0]}\n🔍 OEM: {res[1]}\n💰 {res[2]} грн"
+            await message.answer_photo(photo=res[3], caption=caption, reply_markup=btn)
+    else: await message.answer("Ничего не найдено. 😔")
     await message.answer("Меню:", reply_markup=get_main_menu())
     await state.clear()
 
 # ==================== API ДЛЯ MINI APP ====================
 async def api_ads(request):
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("SELECT id, name, oem, price, category, user_id, photo_id, car_info FROM ads ORDER BY id DESC LIMIT 50")
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
+        rows = cursor.fetchall(); cursor.close(); conn.close()
 
         ads_list = []
         for row in rows:
             photo_url = ""
             if row[6]:
-                try:
-                    file_info = await bot.get_file(row[6])
-                    photo_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
-                except Exception as e:
-                    logging.error(f"Ошибка загрузки фото: {e}")
+                # Генерируем ссылку на НАШ прокси-сервер, а не на Telegram
+                photo_url = f"https://autobazar-a22p.onrender.com/api/photo/{row[6]}"
 
             ads_list.append({
-                "id": row[0],
-                "name": row[1],
-                "oem": row[2],
-                "price": row[3],
-                "category": row[4],
-                "user_id": row[5],
-                "photo_url": photo_url,
-                "car_info": row[7]
+                "id": row[0], "name": row[1], "oem": row[2], "price": row[3],
+                "category": row[4], "user_id": row[5], "photo_url": photo_url, "car_info": row[7]
             })
-        
         return web.json_response(ads_list, headers={'Access-Control-Allow-Origin': '*'})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500, headers={'Access-Control-Allow-Origin': '*'})
+
+# НОВЫЙ ЭНДПОИНТ: ПРОКСИ ДЛЯ СКАЧИВАНИЯ ФОТО ИЗ TELEGRAM
+async def api_photo(request):
+    file_id = request.match_info['file_id']
+    try:
+        # Скачиваем файл из телеграма
+        file_info = await bot.get_file(file_id)
+        file_bytes = await bot.download_file(file_info.file_path)
+        # Отдаем картинку в браузер
+        return web.Response(body=file_bytes.read(), content_type='image/jpeg')
+    except Exception as e:
+        return web.Response(text=str(e), status=404)
 
 # --- ВЕБ-СЕРВЕР ---
 async def health_check(request):
@@ -510,6 +413,7 @@ async def main():
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/api/ads', api_ads)
+    app.router.add_get('/api/photo/{file_id}', api_photo) # <-- ДОБАВИЛИ НОВЫЙ МАРШРУТ
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 5000)))

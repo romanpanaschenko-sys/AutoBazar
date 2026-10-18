@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import psycopg2
+from datetime import datetime, timedelta
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -15,7 +16,7 @@ TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GROUP_ID = os.environ.get("GROUP_ID")
-ADMIN_ID = 405871469  # Твой ID
+ADMIN_ID = 405871469  # Твой правильный ID
 
 if not TOKEN or not CHANNEL_ID or not DATABASE_URL:
     raise ValueError("Заданы не все переменные окружения!")
@@ -34,25 +35,71 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # Создаем таблицу объявлений
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT, category TEXT, name TEXT, oem TEXT, 
-                price TEXT, photo_id TEXT, message_id BIGINT
+                price TEXT, photo_id TEXT, message_id BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Создаем таблицу запросов
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS requests (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT, description TEXT, oem TEXT, 
-                budget TEXT, message_id BIGINT
+                budget TEXT, message_id BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Добавляем колонку created_at, если таблицы были созданы ранее без нее
+        try:
+            cursor.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
+            cursor.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
+        except Exception:
+            conn.rollback()
+
         conn.commit()
         cursor.close()
         conn.close()
     except Exception as e:
         logging.error(f"Ошибка инициализации БД: {e}")
+
+# --- ФОНОВАЯ АВТООЧИСТКА (Раз в час) ---
+async def auto_clean_loop():
+    while True:
+        try:
+            logging.info("Запуск автоочистки старых объявлений...")
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Ищем объявления старше 30 дней
+            cursor.execute("SELECT id, message_id, name FROM ads WHERE created_at < NOW() - INTERVAL '30 days'")
+            old_ads = cursor.fetchall()
+            for ad_id, msg_id, name in old_ads:
+                try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
+                except: pass
+                cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
+                logging.info(f"Удалено старое объявление: {name}")
+
+            # Ищем запросы старше 30 дней
+            cursor.execute("SELECT id, message_id, description FROM requests WHERE created_at < NOW() - INTERVAL '30 days'")
+            old_reqs = cursor.fetchall()
+            for req_id, msg_id, desc in old_reqs:
+                try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
+                except: pass
+                cursor.execute("DELETE FROM requests WHERE id = %s", (req_id,))
+                logging.info(f"Удален старый запрос: {desc}")
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            logging.error(f"Ошибка в автоочистке: {e}")
+        
+        # Ждем 1 час (3600 секунд) до следующей проверки
+        await asyncio.sleep(3600)
 
 # --- СОСТОЯНИЯ ---
 class AddAdState(StatesGroup):
@@ -101,7 +148,6 @@ def get_category_menu():
     builder.adjust(2)
     return builder.as_markup()
 
-# --- АДМИН ПАНЕЛЬ КЛАВИАТУРА ---
 def get_admin_menu():
     builder = InlineKeyboardBuilder()
     builder.button(text="📊 Статистика", callback_data="admin_stats")
@@ -119,16 +165,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
         reply_markup=get_main_menu()
     )
 
-# ==================== ДИАГНОСТИКА И АДМИН-ПАНЕЛЬ ====================
-@dp.message(Command("myid"))
-async def get_myid(message: types.Message):
-    await message.reply(f"Ваш реальный ID: `{message.from_user.id}`\nID в коде бота: `{ADMIN_ID}`", parse_mode="Markdown")
-
+# ==================== АДМИН-ПАНЕЛЬ ====================
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        # Если ID не совпадает, бот скажет об этом (чтобы мы поняли причину)
-        await message.answer(f"⛔ Доступ запрещен.\nБот видит ваш ID как: `{message.from_user.id}`\nА в коде стоит: `{ADMIN_ID}`", parse_mode="Markdown")
+        await message.answer(f"⛔ Доступ запрещен. Ваш ID: `{message.from_user.id}`", parse_mode="Markdown")
         return
     await message.answer("👑 Панель администратора:", reply_markup=get_admin_menu())
 
@@ -147,8 +188,7 @@ async def admin_stats(callback: types.CallbackQuery):
             f"📊 **Статистика базы данных:**\n\n"
             f"📦 Объявлений о продаже: {ads_count}\n"
             f"🔎 Запросов на покупку: {req_count}",
-            parse_mode="Markdown",
-            reply_markup=get_admin_menu()
+            parse_mode="Markdown", reply_markup=get_admin_menu()
         )
     except Exception as e:
         await callback.message.edit_text(f"Ошибка: {e}", reply_markup=get_admin_menu())
@@ -161,7 +201,6 @@ async def admin_del_ad(callback: types.CallbackQuery):
         conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("SELECT id, message_id, name FROM ads ORDER BY id DESC LIMIT 1")
         result = cursor.fetchone()
-        
         if result:
             ad_id, msg_id, name = result
             try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
@@ -183,7 +222,6 @@ async def admin_del_req(callback: types.CallbackQuery):
         conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("SELECT id, message_id, description FROM requests ORDER BY id DESC LIMIT 1")
         result = cursor.fetchone()
-        
         if result:
             req_id, msg_id, desc = result
             try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
@@ -207,13 +245,11 @@ async def start_add_ad(callback: types.CallbackQuery, state: FSMContext):
         cursor.execute("SELECT COUNT(*) FROM ads WHERE user_id = %s", (user_id,))
         count = cursor.fetchone()[0]
         cursor.close(); conn.close()
-        
         if count >= 15:
             await callback.message.answer("⚠️ У вас уже 15 активных объявлений. Удалите старые в разделе «Мои объявления».")
             await callback.answer()
             return
-    except Exception:
-        pass
+    except Exception: pass
 
     await callback.message.answer("📸 Шаг 1: Отправьте фотографию запчасти:")
     await state.set_state(AddAdState.waiting_for_photo)
@@ -264,8 +300,7 @@ async def process_price(message: types.Message, state: FSMContext):
         sent_msg = await bot.send_photo(chat_id=CHANNEL_ID, photo=data['photo_id'], caption=post_text, parse_mode="Markdown", reply_markup=contact_btn)
         
         if GROUP_ID:
-            try:
-                await bot.send_message(chat_id=GROUP_ID, text=f"🆕 **Новое объявление о продаже!**\n\n{post_text}", parse_mode="Markdown")
+            try: await bot.send_message(chat_id=GROUP_ID, text=f"🆕 **Новое объявление о продаже!**\n\n{post_text}", parse_mode="Markdown")
             except Exception: pass
 
         conn = get_db_connection(); cursor = conn.cursor()
@@ -311,8 +346,7 @@ async def wanted_budget(message: types.Message, state: FSMContext):
         sent_msg = await bot.send_message(chat_id=CHANNEL_ID, text=post_text, parse_mode="Markdown", reply_markup=contact_btn)
         
         if GROUP_ID:
-            try:
-                await bot.send_message(chat_id=GROUP_ID, text=f"🔔 **Новый запрос на поиск запчасти!**\n\n{post_text}", parse_mode="Markdown")
+            try: await bot.send_message(chat_id=GROUP_ID, text=f"🔔 **Новый запрос на поиск запчасти!**\n\n{post_text}", parse_mode="Markdown")
             except Exception: pass
 
         conn = get_db_connection(); cursor = conn.cursor()
@@ -409,6 +443,11 @@ async def main():
     init_db()
     await asyncio.sleep(3) 
     await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем автоочистку в фоне
+    asyncio.create_task(auto_clean_loop())
+    logging.info("Фоновая автоочистка запущена.")
+
     polling_task = asyncio.create_task(dp.start_polling(bot))
     
     app = web.Application()

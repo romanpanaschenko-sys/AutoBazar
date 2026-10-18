@@ -15,7 +15,7 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 if not TOKEN or not CHANNEL_ID or not DATABASE_URL:
-    raise ValueError("Заданы не все переменные окружения! Проверьте BOT_TOKEN, CHANNEL_ID и DATABASE_URL")
+    raise ValueError("Заданы не все переменные окружения!")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -31,6 +31,7 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # Создаем таблицу со всеми нужными полями
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
                 id SERIAL PRIMARY KEY,
@@ -39,13 +40,23 @@ def init_db():
                 name TEXT,
                 oem TEXT,
                 price TEXT,
-                photo_id TEXT
+                photo_id TEXT,
+                message_id BIGINT
             )
         ''')
         conn.commit()
+        
+        # Пытаемся добавить колонку message_id, если таблица была создана ранее без неё
+        try:
+            cursor.execute("ALTER TABLE ads ADD COLUMN message_id BIGINT;")
+            conn.commit()
+            logging.info("Добавлен столбец message_id.")
+        except psycopg2.Error:
+            conn.rollback() # Если колонка уже существует, просто откатываем ошибку
+            
         cursor.close()
         conn.close()
-        logging.info("База данных PostgreSQL инициализирована.")
+        logging.info("База данных инициализирована.")
     except Exception as e:
         logging.error(f"Ошибка инициализации БД: {e}")
 
@@ -60,18 +71,15 @@ class AddAdState(StatesGroup):
 class SearchState(StatesGroup):
     waiting_for_oem = State()
 
-# --- ФУНКЦИЯ ДЛЯ ХЭШТЕГОВ ---
+# --- ХЭШТЕГИ ---
 def generate_hashtags(category, name, oem):
     cat_tag = "#" + "".join(c for c in category if c.isalnum())
     first_word = name.split()[0] if name else "Деталь"
     name_tag = "#" + "".join(c for c in first_word if c.isalnum())
-    
     tags = f"{cat_tag} {name_tag} #АвтоБарахолка"
-    
     if oem.lower() != "нет" and oem.strip():
         oem_tag = "#" + "".join(c for c in oem if c.isalnum())
         tags += f" {oem_tag}"
-        
     return tags
 
 # --- КЛАВИАТУРЫ ---
@@ -79,6 +87,7 @@ def get_main_menu():
     builder = InlineKeyboardBuilder()
     builder.button(text="📦 Разместить объявление", callback_data="add_ad")
     builder.button(text="🔍 Поиск по OEM", callback_data="search_oem")
+    builder.button(text="👤 Мои объявления", callback_data="my_ads")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -152,24 +161,7 @@ async def process_price(message: types.Message, state: FSMContext):
     photo_id = data['photo_id']
     user_id = message.from_user.id
     
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO ads (user_id, category, name, oem, price, photo_id) VALUES (%s, %s, %s, %s, %s, %s)", 
-            (user_id, category, name, oem, price, photo_id)
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        await message.answer(f"❌ Ошибка сохранения в БД: {e}")
-        return
-    
-    # Генерируем хэштеги
     tags = generate_hashtags(category, name, oem)
-
-    # Формируем пост
     post_text = (
         f"📂 **Категория:** {category}\n"
         f"⚙️ **{name}**\n\n"
@@ -183,12 +175,96 @@ async def process_price(message: types.Message, state: FSMContext):
     ])
     
     try:
-        await bot.send_photo(chat_id=CHANNEL_ID, photo=photo_id, caption=post_text, parse_mode="Markdown", reply_markup=contact_btn)
+        # Публикуем и СОХРАНЯЕМ ID сообщения в канале
+        sent_msg = await bot.send_photo(
+            chat_id=CHANNEL_ID, 
+            photo=photo_id, 
+            caption=post_text, 
+            parse_mode="Markdown", 
+            reply_markup=contact_btn
+        )
+        message_id = sent_msg.message_id
+        
+        # Сохраняем в БД вместе с message_id
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO ads (user_id, category, name, oem, price, photo_id, message_id) VALUES (%s, %s, %s, %s, %s, %s, %s)", 
+            (user_id, category, name, oem, price, photo_id, message_id)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
         await message.answer("✅ Объявление опубликовано в канале!", reply_markup=get_main_menu())
     except Exception as e:
         await message.answer(f"❌ Ошибка публикации: {e}", reply_markup=get_main_menu())
         
     await state.clear()
+
+# --- МОИ ОБЪЯВЛЕНИЯ ---
+@dp.callback_query(F.data == "my_ads")
+async def show_my_ads(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, price FROM ads WHERE user_id = %s", (user_id,))
+        results = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        if not results:
+            await callback.message.answer("У вас пока нет объявлений.")
+            return
+
+        await callback.message.answer("Ваши объявления (нажмите 🗑, чтобы удалить):")
+        for res in results:
+            ad_id, name, price = res
+            # Создаем кнопку удаления для каждого объявления
+            del_btn = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{ad_id}")]
+            ])
+            await callback.message.answer(f"⚙️ {name}\n💰 {price} грн", reply_markup=del_btn)
+            
+    except Exception as e:
+        await callback.message.answer(f"Ошибка: {e}")
+    await callback.answer()
+
+# --- УДАЛЕНИЕ ---
+@dp.callback_query(F.data.startswith("del_"))
+async def delete_ad(callback: types.CallbackQuery):
+    ad_id = callback.data.split("_")[1]
+    user_id = callback.from_user.id
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # Получаем message_id и проверяем, что это объявление принадлежит этому юзеру
+        cursor.execute("SELECT message_id FROM ads WHERE id = %s AND user_id = %s", (ad_id, user_id))
+        result = cursor.fetchone()
+        
+        if result:
+            message_id = result[0]
+            # Пытаемся удалить сообщение из канала
+            try:
+                await bot.delete_message(chat_id=CHANNEL_ID, message_id=message_id)
+            except Exception as e:
+                logging.warning(f"Не удалось удалить сообщение из канала: {e}")
+            
+            # Удаляем из базы данных
+            cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
+            conn.commit()
+            
+            await callback.message.edit_text("✅ Объявление удалено из базы и канала.")
+        else:
+            await callback.message.edit_text("⚠️ Объявление не найдено или не принадлежит вам.")
+            
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка удаления: {e}")
+    await callback.answer()
 
 # --- ПОИСК ---
 @dp.callback_query(F.data == "search_oem")
@@ -247,7 +323,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 5000)))
     await site.start()
     
-    logging.info("Бот с хэштегами и PostgreSQL запущен!")
+    logging.info("Бот с удалением и My Ads запущен!")
     await polling_task
 
 if __name__ == "__main__":

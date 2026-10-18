@@ -15,7 +15,7 @@ TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GROUP_ID = os.environ.get("GROUP_ID")
-ADMIN_ID = 1087968824  # Твой ID без минуса
+ADMIN_ID = 1087968824  # Твой ID
 
 if not TOKEN or not CHANNEL_ID or not DATABASE_URL:
     raise ValueError("Заданы не все переменные окружения!")
@@ -119,11 +119,17 @@ async def cmd_start(message: types.Message, state: FSMContext):
         reply_markup=get_main_menu()
     )
 
-# ==================== АДМИН-ПАНЕЛЬ ====================
+# ==================== ДИАГНОСТИКА И АДМИН-ПАНЕЛЬ ====================
+@dp.message(Command("myid"))
+async def get_myid(message: types.Message):
+    await message.reply(f"Ваш реальный ID: `{message.from_user.id}`\nID в коде бота: `{ADMIN_ID}`", parse_mode="Markdown")
+
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        return  # Игнорируем чужие команды
+        # Если ID не совпадает, бот скажет об этом (чтобы мы поняли причину)
+        await message.answer(f"⛔ Доступ запрещен.\nБот видит ваш ID как: `{message.from_user.id}`\nА в коде стоит: `{ADMIN_ID}`", parse_mode="Markdown")
+        return
     await message.answer("👑 Панель администратора:", reply_markup=get_admin_menu())
 
 @dp.callback_query(F.data == "admin_stats")
@@ -162,7 +168,7 @@ async def admin_del_ad(callback: types.CallbackQuery):
             except: pass
             cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
             conn.commit()
-            await callback.message.edit_text(f"✅ Последнее объявление «{name}» удалено из базы и канала.", reply_markup=get_admin_menu())
+            await callback.message.edit_text(f"✅ Последнее объявление «{name}» удалено.", reply_markup=get_admin_menu())
         else:
             await callback.message.edit_text("В базе нет объявлений.", reply_markup=get_admin_menu())
         cursor.close(); conn.close()
@@ -184,7 +190,7 @@ async def admin_del_req(callback: types.CallbackQuery):
             except: pass
             cursor.execute("DELETE FROM requests WHERE id = %s", (req_id,))
             conn.commit()
-            await callback.message.edit_text(f"✅ Последний запрос удален из базы и канала.", reply_markup=get_admin_menu())
+            await callback.message.edit_text(f"✅ Последний запрос удален.", reply_markup=get_admin_menu())
         else:
             await callback.message.edit_text("В базе нет запросов.", reply_markup=get_admin_menu())
         cursor.close(); conn.close()
@@ -401,7 +407,7 @@ async def health_check(request):
 async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
-    await asyncio.sleep(3) # Защита от конфликта при перезапуске
+    await asyncio.sleep(3) 
     await bot.delete_webhook(drop_pending_updates=True)
     polling_task = asyncio.create_task(dp.start_polling(bot))
     

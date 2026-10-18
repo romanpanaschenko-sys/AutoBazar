@@ -442,6 +442,30 @@ async def process_search(message: types.Message, state: FSMContext):
     await state.clear()
 
 # --- ВЕБ-СЕРВЕР ---
+# --- API ДЛЯ MINI APP ---
+async def api_ads(request):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # Достаем последние 50 деталей
+        cursor.execute("SELECT id, name, oem, price, category FROM ads ORDER BY id DESC LIMIT 50")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        ads_list = []
+        for row in rows:
+            ads_list.append({
+                "id": row[0],
+                "name": row[1],
+                "oem": row[2],
+                "price": row[3],
+                "category": row[4]
+            })
+        # Возвращаем данные и разрешаем доступ с других сайтов (CORS)
+        return web.json_response(ads_list, headers={'Access-Control-Allow-Origin': '*'})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500, headers={'Access-Control-Allow-Origin': '*'})
 async def health_check(request):
     return web.Response(text="AutoBot is running!")
 
@@ -456,6 +480,7 @@ async def main():
     
     app = web.Application()
     app.router.add_get('/', health_check)
+    app.router.add_get('/api/ads', api_ads)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 5000)))

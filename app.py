@@ -15,7 +15,7 @@ TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GROUP_ID = os.environ.get("GROUP_ID")
-ADMIN_ID = 1087968824  # Твой ID
+ADMIN_ID = 405871469  # Твой ID
 
 if not TOKEN or not CHANNEL_ID or not DATABASE_URL:
     raise ValueError("Заданы не все переменные окружения!")

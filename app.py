@@ -16,7 +16,7 @@ TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GROUP_ID = os.environ.get("GROUP_ID")
-ADMIN_ID = 405871469  # Твой правильный ID
+ADMIN_ID = 405871469 
 
 if not TOKEN or not CHANNEL_ID or not DATABASE_URL:
     raise ValueError("Заданы не все переменные окружения!")
@@ -35,11 +35,13 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # Добавили поле car_info в таблицу ads
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT, category TEXT, name TEXT, oem TEXT, 
                 price TEXT, photo_id TEXT, message_id BIGINT,
+                car_info TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -52,6 +54,7 @@ def init_db():
             )
         ''')
         try:
+            cursor.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS car_info TEXT;")
             cursor.execute("ALTER TABLE ads ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
             cursor.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
         except Exception:
@@ -93,6 +96,7 @@ async def auto_clean_loop():
 # --- СОСТОЯНИЯ ---
 class AddAdState(StatesGroup):
     waiting_for_photo = State()
+    waiting_for_car_info = State() # <--- Новый шаг
     waiting_for_category = State()
     waiting_for_name = State()
     waiting_for_oem = State()
@@ -107,11 +111,12 @@ class SearchState(StatesGroup):
     waiting_for_oem = State()
 
 # --- ХЭШТЕГИ ---
-def generate_hashtags(category, name, oem):
+def generate_hashtags(category, name, oem, car_info):
     cat_tag = "#" + "".join(c for c in category if c.isalnum())
     first_word = name.split()[0] if name else "Деталь"
     name_tag = "#" + "".join(c for c in first_word if c.isalnum())
-    tags = f"{cat_tag} {name_tag} #АвтоБарахолка"
+    car_tag = "#" + "".join(c for c in car_info.split()[0] if c.isalnum()) if car_info else ""
+    tags = f"{cat_tag} {name_tag} {car_tag} #АвтоБарахолка"
     if oem.lower() != "нет" and oem.strip():
         oem_tag = "#" + "".join(c for c in oem if c.isalnum())
         tags += f" {oem_tag}"
@@ -163,35 +168,30 @@ async def pin_ad_invoice(callback: types.CallbackQuery):
     result = cursor.fetchone(); cursor.close(); conn.close()
     
     if result:
-        # Выставляем счет на 50 звезд
         await bot.send_invoice(
             chat_id=callback.from_user.id,
             title="Закрепление объявления",
             description="Ваше объявление будет закреплено в самом верху канала на 24 часа.",
-            payload=f"pin_{ad_id}_{result[0]}", # Передаем ID объявления и ID сообщения
-            provider_token="", # Для Stars оставляем пустым
-            currency="XTR", # Код валюты Telegram Stars
-            prices=[LabeledPrice(label="Закрепление", amount=50)], # 50 звезд
+            payload=f"pin_{ad_id}_{result[0]}",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label="Закрепление", amount=50)],
         )
     await callback.answer()
 
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery):
-    # Обязательно подтверждаем готовность принять платеж
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: types.Message):
     payload = message.successful_payment.invoice_payload
-    # Достаем ad_id и msg_id из payload
     _, ad_id, msg_id = payload.split("_")
-    
     try:
-        # Закрепляем сообщение в канале
         await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=int(msg_id), disable_notification=False)
         await message.answer("✅ Оплата прошла успешно! Ваше объявление закреплено на 24 часа.")
     except Exception as e:
-        await message.answer(f"❌ Оплата прошла, но не удалось закрепить: {e}")
+        await message.answer(f"❌ Ошибка закрепления: {e}")
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 @dp.message(Command("admin"))
@@ -281,39 +281,47 @@ async def start_add_ad(callback: types.CallbackQuery, state: FSMContext):
 async def process_photo(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     await state.update_data(photo_id=photo_id)
-    await message.answer("📂 Шаг 2: Выберите категорию запчасти:", reply_markup=get_category_menu())
-    await state.set_state(AddAdState.waiting_for_category)
+    await message.answer("🚘 Шаг 2: Для какого авто эта деталь? (Напишите марку, модель, кузов и год. Например: BMW X5 E43 2009):")
+    await state.set_state(AddAdState.waiting_for_car_info)
 
 @dp.message(AddAdState.waiting_for_photo)
 async def process_photo_error(message: types.Message):
     await message.answer("⚠️ Пожалуйста, отправьте именно фотографию.")
+
+@dp.message(AddAdState.waiting_for_car_info)
+async def process_car_info(message: types.Message, state: FSMContext):
+    await state.update_data(car_info=message.text)
+    await message.answer("📂 Шаг 3: Выберите категорию запчасти:", reply_markup=get_category_menu())
+    await state.set_state(AddAdState.waiting_for_category)
 
 @dp.callback_query(AddAdState.waiting_for_category, F.data.startswith("cat_"))
 async def process_category(callback: types.CallbackQuery, state: FSMContext):
     category = callback.data.split("_")[1]
     await state.update_data(category=category)
     await callback.message.edit_text(f"Категория выбрана: {category}")
-    await callback.message.answer("📝 Шаг 3: Введите название детали:")
+    await callback.message.answer("📝 Шаг 4: Введите название детали (например: Стартер, Фара):")
     await state.set_state(AddAdState.waiting_for_name)
     await callback.answer()
 
 @dp.message(AddAdState.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text)
-    await message.answer("🔍 Шаг 4: Введите OEM-номер (или напишите 'нет'):")
+    await message.answer("🔍 Шаг 5: Введите OEM-номер (или напишите 'нет'):")
     await state.set_state(AddAdState.waiting_for_oem)
 
 @dp.message(AddAdState.waiting_for_oem)
 async def process_oem(message: types.Message, state: FSMContext):
     await state.update_data(oem=message.text)
-    await message.answer("💰 Шаг 5: Введите цену в грн:")
+    await message.answer("💰 Шаг 6: Введите цену в грн:")
     await state.set_state(AddAdState.waiting_for_price)
 
 @dp.message(AddAdState.waiting_for_price)
 async def process_price(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    tags = generate_hashtags(data['category'], data['name'], data['oem'])
-    post_text = (f"📂 **Категория:** {data['category']}\n⚙️ **{data['name']}**\n\n"
+    tags = generate_hashtags(data['category'], data['name'], data['oem'], data['car_info'])
+    # Обновили шаблон поста, добавили инфу об авто
+    post_text = (f"🚘 **Авто:** {data['car_info']}\n"
+                 f"📂 **Категория:** {data['category']}\n⚙️ **{data['name']}**\n\n"
                  f"🔍 **OEM:** `{data['oem']}`\n💰 **Цена:** {message.text} грн\n\n{tags}")
     
     contact_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={message.from_user.id}")]])
@@ -325,8 +333,9 @@ async def process_price(message: types.Message, state: FSMContext):
             except Exception: pass
 
         conn = get_db_connection(); cursor = conn.cursor()
-        cursor.execute("INSERT INTO ads (user_id, category, name, oem, price, photo_id, message_id) VALUES (%s, %s, %s, %s, %s, %s, %s)", 
-                       (message.from_user.id, data['category'], data['name'], data['oem'], message.text, data['photo_id'], sent_msg.message_id))
+        # Добавили car_info в запрос на сохранение
+        cursor.execute("INSERT INTO ads (user_id, category, name, oem, price, photo_id, message_id, car_info) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", 
+                       (message.from_user.id, data['category'], data['name'], data['oem'], message.text, data['photo_id'], sent_msg.message_id, data['car_info']))
         conn.commit(); cursor.close(); conn.close()
         await message.answer("✅ Объявление опубликовано в канале!", reply_markup=get_main_menu())
     except Exception as e:
@@ -426,14 +435,15 @@ async def process_search(message: types.Message, state: FSMContext):
     search_query = message.text.strip().upper()
     try:
         conn = get_db_connection(); cursor = conn.cursor()
-        cursor.execute("SELECT name, oem, price, photo_id, category, user_id FROM ads WHERE UPPER(REPLACE(REPLACE(oem, ' ', ''), '-', '')) LIKE %s", (f"%{search_query}%",))
+        # Ищем и в OEM, и в названии детали
+        cursor.execute("SELECT name, oem, price, photo_id, category, user_id, car_info FROM ads WHERE UPPER(REPLACE(REPLACE(oem, ' ', ''), '-', '')) LIKE %s OR UPPER(name) LIKE %s", (f"%{search_query}%", f"%{search_query}%"))
         results = cursor.fetchall(); cursor.close(); conn.close()
         
         if results:
             await message.answer(f"Найдено {len(results)} объявлений:")
             for res in results:
                 btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={res[5]}")]])
-                caption = f"📂 {res[4]}\n⚙️ {res[0]}\n🔍 OEM: {res[1]}\n💰 Цена: {res[2]} грн"
+                caption = f"🚘 {res[6]}\n📂 {res[4]}\n⚙️ {res[0]}\n🔍 OEM: {res[1]}\n💰 Цена: {res[2]} грн"
                 await message.answer_photo(photo=res[3], caption=caption, reply_markup=btn)
         else:
             await message.answer("Ничего не найдено. 😔")
@@ -441,14 +451,13 @@ async def process_search(message: types.Message, state: FSMContext):
     await message.answer("Меню:", reply_markup=get_main_menu())
     await state.clear()
 
-# --- ВЕБ-СЕРВЕР ---
-# --- API ДЛЯ MINI APP ---
+# ==================== API ДЛЯ MINI APP ====================
 async def api_ads(request):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Добавили photo_id в выборку из базы
-        cursor.execute("SELECT id, name, oem, price, category, user_id, photo_id FROM ads ORDER BY id DESC LIMIT 50")
+        # Добавили car_info в выборку
+        cursor.execute("SELECT id, name, oem, price, category, user_id, photo_id, car_info FROM ads ORDER BY id DESC LIMIT 50")
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -456,11 +465,9 @@ async def api_ads(request):
         ads_list = []
         for row in rows:
             photo_url = ""
-            # Если у объявления есть фото, запрашиваем у Telegram прямой путь к нему
             if row[6]:
                 try:
                     file_info = await bot.get_file(row[6])
-                    # Формируем рабочую ссылку на картинку
                     photo_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
                 except Exception as e:
                     logging.error(f"Ошибка загрузки фото: {e}")
@@ -472,12 +479,15 @@ async def api_ads(request):
                 "price": row[3],
                 "category": row[4],
                 "user_id": row[5],
-                "photo_url": photo_url  # Передаем ссылку в Mini App
+                "photo_url": photo_url,
+                "car_info": row[7] # <--- Передаем в Mini App
             })
         
         return web.json_response(ads_list, headers={'Access-Control-Allow-Origin': '*'})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500, headers={'Access-Control-Allow-Origin': '*'})
+
+# --- ВЕБ-СЕРВЕР ---
 async def health_check(request):
     return web.Response(text="AutoBot is running!")
 

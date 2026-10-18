@@ -31,7 +31,6 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Создаем таблицу со всеми нужными полями
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
                 id SERIAL PRIMARY KEY,
@@ -45,18 +44,9 @@ def init_db():
             )
         ''')
         conn.commit()
-        
-        # Пытаемся добавить колонку message_id, если таблица была создана ранее без неё
-        try:
-            cursor.execute("ALTER TABLE ads ADD COLUMN message_id BIGINT;")
-            conn.commit()
-            logging.info("Добавлен столбец message_id.")
-        except psycopg2.Error:
-            conn.rollback() # Если колонка уже существует, просто откатываем ошибку
-            
         cursor.close()
         conn.close()
-        logging.info("База данных инициализирована.")
+        logging.info("База данных PostgreSQL инициализирована.")
     except Exception as e:
         logging.error(f"Ошибка инициализации БД: {e}")
 
@@ -121,19 +111,17 @@ async def start_add_ad(callback: types.CallbackQuery, state: FSMContext):
 async def process_photo(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     await state.update_data(photo_id=photo_id)
-    
     await message.answer("📂 Шаг 2: Выберите категорию запчасти:", reply_markup=get_category_menu())
     await state.set_state(AddAdState.waiting_for_category)
 
 @dp.message(AddAdState.waiting_for_photo)
 async def process_photo_error(message: types.Message):
-    await message.answer("⚠️ Пожалуйста, отправьте именно фотографию (нажмите на скрепку).")
+    await message.answer("⚠️ Пожалуйста, отправьте именно фотографию.")
 
 @dp.callback_query(AddAdState.waiting_for_category, F.data.startswith("cat_"))
 async def process_category(callback: types.CallbackQuery, state: FSMContext):
     category = callback.data.split("_")[1]
     await state.update_data(category=category)
-    
     await callback.message.edit_text(f"Категория выбрана: {category}")
     await callback.message.answer("📝 Шаг 3: Введите название детали:")
     await state.set_state(AddAdState.waiting_for_name)
@@ -148,7 +136,7 @@ async def process_name(message: types.Message, state: FSMContext):
 @dp.message(AddAdState.waiting_for_oem)
 async def process_oem(message: types.Message, state: FSMContext):
     await state.update_data(oem=message.text)
-    await message.answer("💰 Шаг 5: Введите цену в грн (только цифры):")
+    await message.answer("💰 Шаг 5: Введите цену в грн:")
     await state.set_state(AddAdState.waiting_for_price)
 
 @dp.message(AddAdState.waiting_for_price)
@@ -175,17 +163,12 @@ async def process_price(message: types.Message, state: FSMContext):
     ])
     
     try:
-        # Публикуем и СОХРАНЯЕМ ID сообщения в канале
         sent_msg = await bot.send_photo(
-            chat_id=CHANNEL_ID, 
-            photo=photo_id, 
-            caption=post_text, 
-            parse_mode="Markdown", 
-            reply_markup=contact_btn
+            chat_id=CHANNEL_ID, photo=photo_id, caption=post_text, 
+            parse_mode="Markdown", reply_markup=contact_btn
         )
         message_id = sent_msg.message_id
         
-        # Сохраняем в БД вместе с message_id
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
@@ -199,7 +182,6 @@ async def process_price(message: types.Message, state: FSMContext):
         await message.answer("✅ Объявление опубликовано в канале!", reply_markup=get_main_menu())
     except Exception as e:
         await message.answer(f"❌ Ошибка публикации: {e}", reply_markup=get_main_menu())
-        
     await state.clear()
 
 # --- МОИ ОБЪЯВЛЕНИЯ ---
@@ -218,17 +200,48 @@ async def show_my_ads(callback: types.CallbackQuery):
             await callback.message.answer("У вас пока нет объявлений.")
             return
 
-        await callback.message.answer("Ваши объявления (нажмите 🗑, чтобы удалить):")
+        await callback.message.answer("Ваши объявления (доступные действия под каждым):")
         for res in results:
             ad_id, name, price = res
-            # Создаем кнопку удаления для каждого объявления
-            del_btn = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{ad_id}")]
-            ])
-            await callback.message.answer(f"⚙️ {name}\n💰 {price} грн", reply_markup=del_btn)
             
+            # Теперь две кнопки в ряд: Удалить и Закрепить
+            buttons = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="⭐ Закрепить", callback_data=f"pin_{ad_id}"),
+                    InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{ad_id}")
+                ]
+            ])
+            await callback.message.answer(f"⚙️ {name}\n💰 {price} грн", reply_markup=buttons)
     except Exception as e:
         await callback.message.answer(f"Ошибка: {e}")
+    await callback.answer()
+
+# --- ЗАКРЕПЛЕНИЕ В КАНАЛЕ (VIP) ---
+@dp.callback_query(F.data.startswith("pin_"))
+async def pin_ad(callback: types.CallbackQuery):
+    ad_id = callback.data.split("_")[1]
+    user_id = callback.from_user.id
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT message_id FROM ads WHERE id = %s AND user_id = %s", (ad_id, user_id))
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if result:
+            message_id = result[0]
+            try:
+                # Закрепляем сообщение в канале
+                await bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=message_id, disable_notification=False)
+                await callback.message.edit_text("✅ Объявление успешно закреплено в канале!")
+            except Exception as e:
+                await callback.message.edit_text(f"❌ Не удалось закрепить: {e}")
+        else:
+            await callback.message.edit_text("⚠️ Объявление не найдено.")
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
     await callback.answer()
 
 # --- УДАЛЕНИЕ ---
@@ -236,30 +249,24 @@ async def show_my_ads(callback: types.CallbackQuery):
 async def delete_ad(callback: types.CallbackQuery):
     ad_id = callback.data.split("_")[1]
     user_id = callback.from_user.id
-    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Получаем message_id и проверяем, что это объявление принадлежит этому юзеру
         cursor.execute("SELECT message_id FROM ads WHERE id = %s AND user_id = %s", (ad_id, user_id))
         result = cursor.fetchone()
         
         if result:
             message_id = result[0]
-            # Пытаемся удалить сообщение из канала
             try:
                 await bot.delete_message(chat_id=CHANNEL_ID, message_id=message_id)
-            except Exception as e:
-                logging.warning(f"Не удалось удалить сообщение из канала: {e}")
+            except Exception:
+                pass # Сообщение могло быть уже удалено вручную
             
-            # Удаляем из базы данных
             cursor.execute("DELETE FROM ads WHERE id = %s", (ad_id,))
             conn.commit()
-            
             await callback.message.edit_text("✅ Объявление удалено из базы и канала.")
         else:
-            await callback.message.edit_text("⚠️ Объявление не найдено или не принадлежит вам.")
-            
+            await callback.message.edit_text("⚠️ Объявление не найдено.")
         cursor.close()
         conn.close()
     except Exception as e:
@@ -276,7 +283,6 @@ async def start_search(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(SearchState.waiting_for_oem)
 async def process_search(message: types.Message, state: FSMContext):
     search_query = message.text.strip().upper()
-    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -298,7 +304,6 @@ async def process_search(message: types.Message, state: FSMContext):
                 await message.answer_photo(photo=res[3], caption=caption, reply_markup=contact_btn)
         else:
             await message.answer("По этому номеру ничего не найдено. 😔")
-            
     except Exception as e:
         await message.answer(f"❌ Ошибка поиска: {e}")
         
@@ -323,7 +328,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 5000)))
     await site.start()
     
-    logging.info("Бот с удалением и My Ads запущен!")
+    logging.info("Бот с VIP-закреплением запущен!")
     await polling_task
 
 if __name__ == "__main__":

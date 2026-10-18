@@ -35,7 +35,6 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Добавили поле car_info в таблицу ads
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
                 id SERIAL PRIMARY KEY,
@@ -96,7 +95,7 @@ async def auto_clean_loop():
 # --- СОСТОЯНИЯ ---
 class AddAdState(StatesGroup):
     waiting_for_photo = State()
-    waiting_for_car_info = State() # <--- Новый шаг
+    waiting_for_car_info = State()
     waiting_for_category = State()
     waiting_for_name = State()
     waiting_for_oem = State()
@@ -279,14 +278,25 @@ async def start_add_ad(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(AddAdState.waiting_for_photo, F.photo)
 async def process_photo(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    
+    # Защита от альбомов: если фото уже сохранено, игнорируем остальные
+    if 'photo_id' in data:
+        return
+
     photo_id = message.photo[-1].file_id
     await state.update_data(photo_id=photo_id)
+    
     await message.answer("🚘 Шаг 2: Для какого авто эта деталь? (Напишите марку, модель, кузов и год. Например: BMW X5 E43 2009):")
     await state.set_state(AddAdState.waiting_for_car_info)
 
 @dp.message(AddAdState.waiting_for_photo)
 async def process_photo_error(message: types.Message):
-    await message.answer("⚠️ Пожалуйста, отправьте именно фотографию.")
+    await message.answer("⚠️ Пожалуйста, отправьте именно фотографию (нажмите на скрепку).")
+
+@dp.message(AddAdState.waiting_for_car_info, F.photo)
+async def process_car_info_photo_error(message: types.Message):
+    await message.answer("⚠️ Фото уже принято. Пожалуйста, напишите текстом: марку, модель, кузов и год (например, BMW X5 E43 2009).")
 
 @dp.message(AddAdState.waiting_for_car_info)
 async def process_car_info(message: types.Message, state: FSMContext):
@@ -319,7 +329,7 @@ async def process_oem(message: types.Message, state: FSMContext):
 async def process_price(message: types.Message, state: FSMContext):
     data = await state.get_data()
     tags = generate_hashtags(data['category'], data['name'], data['oem'], data['car_info'])
-    # Обновили шаблон поста, добавили инфу об авто
+    
     post_text = (f"🚘 **Авто:** {data['car_info']}\n"
                  f"📂 **Категория:** {data['category']}\n⚙️ **{data['name']}**\n\n"
                  f"🔍 **OEM:** `{data['oem']}`\n💰 **Цена:** {message.text} грн\n\n{tags}")
@@ -333,7 +343,6 @@ async def process_price(message: types.Message, state: FSMContext):
             except Exception: pass
 
         conn = get_db_connection(); cursor = conn.cursor()
-        # Добавили car_info в запрос на сохранение
         cursor.execute("INSERT INTO ads (user_id, category, name, oem, price, photo_id, message_id, car_info) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", 
                        (message.from_user.id, data['category'], data['name'], data['oem'], message.text, data['photo_id'], sent_msg.message_id, data['car_info']))
         conn.commit(); cursor.close(); conn.close()
@@ -426,7 +435,7 @@ async def delete_ad(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "search_oem")
 async def start_search(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Введите OEM-номер для поиска:")
+    await callback.message.answer("Введите OEM-номер или название детали для поиска:")
     await state.set_state(SearchState.waiting_for_oem)
     await callback.answer()
 
@@ -435,7 +444,6 @@ async def process_search(message: types.Message, state: FSMContext):
     search_query = message.text.strip().upper()
     try:
         conn = get_db_connection(); cursor = conn.cursor()
-        # Ищем и в OEM, и в названии детали
         cursor.execute("SELECT name, oem, price, photo_id, category, user_id, car_info FROM ads WHERE UPPER(REPLACE(REPLACE(oem, ' ', ''), '-', '')) LIKE %s OR UPPER(name) LIKE %s", (f"%{search_query}%", f"%{search_query}%"))
         results = cursor.fetchall(); cursor.close(); conn.close()
         
@@ -456,7 +464,6 @@ async def api_ads(request):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Добавили car_info в выборку
         cursor.execute("SELECT id, name, oem, price, category, user_id, photo_id, car_info FROM ads ORDER BY id DESC LIMIT 50")
         rows = cursor.fetchall()
         cursor.close()
@@ -480,7 +487,7 @@ async def api_ads(request):
                 "category": row[4],
                 "user_id": row[5],
                 "photo_url": photo_url,
-                "car_info": row[7] # <--- Передаем в Mini App
+                "car_info": row[7]
             })
         
         return web.json_response(ads_list, headers={'Access-Control-Allow-Origin': '*'})

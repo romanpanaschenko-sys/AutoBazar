@@ -447,21 +447,34 @@ async def api_ads(request):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, name, oem, price, category, user_id FROM ads ORDER BY id DESC LIMIT 50")
+        # Добавили photo_id в выборку из базы
+        cursor.execute("SELECT id, name, oem, price, category, user_id, photo_id FROM ads ORDER BY id DESC LIMIT 50")
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
 
         ads_list = []
         for row in rows:
+            photo_url = ""
+            # Если у объявления есть фото, запрашиваем у Telegram прямой путь к нему
+            if row[6]:
+                try:
+                    file_info = await bot.get_file(row[6])
+                    # Формируем рабочую ссылку на картинку
+                    photo_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
+                except Exception as e:
+                    logging.error(f"Ошибка загрузки фото: {e}")
+
             ads_list.append({
                 "id": row[0],
                 "name": row[1],
                 "oem": row[2],
                 "price": row[3],
                 "category": row[4],
-                "user_id": row[5] # <-- Добавили ID продавца
+                "user_id": row[5],
+                "photo_url": photo_url  # Передаем ссылку в Mini App
             })
+        
         return web.json_response(ads_list, headers={'Access-Control-Allow-Origin': '*'})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500, headers={'Access-Control-Allow-Origin': '*'})

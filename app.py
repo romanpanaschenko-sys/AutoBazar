@@ -68,7 +68,8 @@ def get_category_menu():
     return builder.as_markup()
 
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear() # <--- ВОТ ЭТА СТРОКА СБРАСЫВАЕТ ВСЕ ШАГИ
     await message.answer(
         "🚗 Привет! Добро пожаловать в авто-барахолку.\n"
         "Выбери действие в меню ниже:",

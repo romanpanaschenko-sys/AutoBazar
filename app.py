@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import psycopg2
-from urllib.parse import urlparse
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -23,7 +22,6 @@ dp = Dispatcher()
 
 # --- ПОДКЛЮЧЕНИЕ К POSTGRESQL ---
 def get_db_connection():
-    # Render выдает ссылки, начинающиеся с postgres://, но psycopg2 требует postgresql://
     url = DATABASE_URL
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
@@ -33,7 +31,6 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # В PostgreSQL автоинкремент называется SERIAL, а user_id может быть очень большим (BIGINT)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
                 id SERIAL PRIMARY KEY,
@@ -48,7 +45,7 @@ def init_db():
         conn.commit()
         cursor.close()
         conn.close()
-        logging.info("База данных PostgreSQL успешно инициализирована.")
+        logging.info("База данных PostgreSQL инициализирована.")
     except Exception as e:
         logging.error(f"Ошибка инициализации БД: {e}")
 
@@ -62,6 +59,20 @@ class AddAdState(StatesGroup):
 
 class SearchState(StatesGroup):
     waiting_for_oem = State()
+
+# --- ФУНКЦИЯ ДЛЯ ХЭШТЕГОВ ---
+def generate_hashtags(category, name, oem):
+    cat_tag = "#" + "".join(c for c in category if c.isalnum())
+    first_word = name.split()[0] if name else "Деталь"
+    name_tag = "#" + "".join(c for c in first_word if c.isalnum())
+    
+    tags = f"{cat_tag} {name_tag} #АвтоБарахолка"
+    
+    if oem.lower() != "нет" and oem.strip():
+        oem_tag = "#" + "".join(c for c in oem if c.isalnum())
+        tags += f" {oem_tag}"
+        
+    return tags
 
 # --- КЛАВИАТУРЫ ---
 def get_main_menu():
@@ -83,7 +94,7 @@ def get_category_menu():
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear() # Сбрасываем старые шаги
+    await state.clear()
     await message.answer(
         "🚗 Привет! Добро пожаловать в авто-барахолку.\n"
         "Выбери действие в меню ниже:",
@@ -141,7 +152,6 @@ async def process_price(message: types.Message, state: FSMContext):
     photo_id = data['photo_id']
     user_id = message.from_user.id
     
-    # Сохраняем в PostgreSQL (используем %s вместо ?)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -156,12 +166,16 @@ async def process_price(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка сохранения в БД: {e}")
         return
     
+    # Генерируем хэштеги
+    tags = generate_hashtags(category, name, oem)
+
     # Формируем пост
     post_text = (
         f"📂 **Категория:** {category}\n"
         f"⚙️ **{name}**\n\n"
         f"🔍 **OEM:** `{oem}`\n"
-        f"💰 **Цена:** {price} грн"
+        f"💰 **Цена:** {price} грн\n\n"
+        f"{tags}"
     )
     
     contact_btn = InlineKeyboardMarkup(inline_keyboard=[
@@ -190,7 +204,6 @@ async def process_search(message: types.Message, state: FSMContext):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Запрос для PostgreSQL (%s)
         cursor.execute(
             "SELECT name, oem, price, photo_id, category, user_id FROM ads WHERE UPPER(REPLACE(REPLACE(oem, ' ', ''), '-', '')) LIKE %s", 
             (f"%{search_query}%",)
@@ -234,7 +247,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 5000)))
     await site.start()
     
-    logging.info("Бот с PostgreSQL запущен!")
+    logging.info("Бот с хэштегами и PostgreSQL запущен!")
     await polling_task
 
 if __name__ == "__main__":

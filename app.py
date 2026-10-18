@@ -10,9 +10,11 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
+# --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+GROUP_ID = os.environ.get("GROUP_ID") # <--- НОВАЯ ПЕРЕМЕННАЯ
 
 if not TOKEN or not CHANNEL_ID or not DATABASE_URL:
     raise ValueError("Заданы не все переменные окружения!")
@@ -31,7 +33,6 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Таблица для продажи
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ads (
                 id SERIAL PRIMARY KEY,
@@ -39,7 +40,6 @@ def init_db():
                 price TEXT, photo_id TEXT, message_id BIGINT
             )
         ''')
-        # Новая таблица для запросов (Куплю)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS requests (
                 id SERIAL PRIMARY KEY,
@@ -114,16 +114,13 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def start_add_ad(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM ads WHERE user_id = %s", (user_id,))
         count = cursor.fetchone()[0]
-        cursor.close()
-        conn.close()
+        cursor.close(); conn.close()
         
-        # Лимит 15 объявлений
         if count >= 15:
-            await callback.message.answer("⚠️ У вас уже 15 активных объявлений. Удалите старые в разделе «Мои объявления», чтобы добавить новые.")
+            await callback.message.answer("⚠️ У вас уже 15 активных объявлений. Удалите старые в разделе «Мои объявления».")
             await callback.answer()
             return
     except Exception:
@@ -175,13 +172,22 @@ async def process_price(message: types.Message, state: FSMContext):
     contact_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать продавцу", url=f"tg://user?id={message.from_user.id}")]])
     
     try:
+        # 1. Публикуем в канал
         sent_msg = await bot.send_photo(chat_id=CHANNEL_ID, photo=data['photo_id'], caption=post_text, parse_mode="Markdown", reply_markup=contact_btn)
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        
+        # 2. Уведомление в группу
+        if GROUP_ID:
+            try:
+                group_text = f"🆕 **Новое объявление о продаже!**\n\n{post_text}"
+                await bot.send_message(chat_id=GROUP_ID, text=group_text, parse_mode="Markdown")
+            except Exception as e:
+                logging.warning(f"Не удалось отправить в группу: {e}")
+
+        conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("INSERT INTO ads (user_id, category, name, oem, price, photo_id, message_id) VALUES (%s, %s, %s, %s, %s, %s, %s)", 
                        (message.from_user.id, data['category'], data['name'], data['oem'], message.text, data['photo_id'], sent_msg.message_id))
         conn.commit(); cursor.close(); conn.close()
-        await message.answer("✅ Объявление опубликовано!", reply_markup=get_main_menu())
+        await message.answer("✅ Объявление опубликовано в канале!", reply_markup=get_main_menu())
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}", reply_markup=get_main_menu())
     await state.clear()
@@ -217,27 +223,33 @@ async def wanted_budget(message: types.Message, state: FSMContext):
     contact_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Предложить деталь", url=f"tg://user?id={message.from_user.id}")]])
     
     try:
-        # Для запросов отправляем текстовое сообщение без фото
+        # 1. Публикуем в канал
         sent_msg = await bot.send_message(chat_id=CHANNEL_ID, text=post_text, parse_mode="Markdown", reply_markup=contact_btn)
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        
+        # 2. Уведомление в группу
+        if GROUP_ID:
+            try:
+                group_text = f"🔔 **Новый запрос на поиск запчасти!**\n\n{post_text}"
+                await bot.send_message(chat_id=GROUP_ID, text=group_text, parse_mode="Markdown")
+            except Exception as e:
+                logging.warning(f"Не удалось отправить в группу: {e}")
+
+        conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("INSERT INTO requests (user_id, description, oem, budget, message_id) VALUES (%s, %s, %s, %s, %s)", 
                        (message.from_user.id, data['desc'], data['oem'], message.text, sent_msg.message_id))
         conn.commit(); cursor.close(); conn.close()
-        await message.answer("✅ Ваш запрос опубликован! Продавцы скоро свяжутся с вами.", reply_markup=get_main_menu())
+        await message.answer("✅ Ваш запрос опубликован в канале и отправлен в группу!", reply_markup=get_main_menu())
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}", reply_markup=get_main_menu())
     await state.clear()
 
-# ==================== ОСТАЛЬНОЕ (МОИ ОБЪЯВЛЕНИЯ, ПОИСК, VIP) ====================
+# ==================== МОИ ОБЪЯВЛЕНИЯ, ПОИСК, VIP ====================
 @dp.callback_query(F.data == "my_ads")
 async def show_my_ads(callback: types.CallbackQuery):
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("SELECT id, name, price FROM ads WHERE user_id = %s", (callback.from_user.id,))
-        results = cursor.fetchall()
-        cursor.close(); conn.close()
+        results = cursor.fetchall(); cursor.close(); conn.close()
         
         if not results:
             await callback.message.answer("У вас пока нет объявлений о продаже.")

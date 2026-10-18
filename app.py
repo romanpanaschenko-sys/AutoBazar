@@ -447,8 +447,7 @@ async def api_ads(request):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Достаем последние 50 деталей
-        cursor.execute("SELECT id, name, oem, price, category FROM ads ORDER BY id DESC LIMIT 50")
+        cursor.execute("SELECT id, name, oem, price, category, user_id FROM ads ORDER BY id DESC LIMIT 50")
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -460,9 +459,9 @@ async def api_ads(request):
                 "name": row[1],
                 "oem": row[2],
                 "price": row[3],
-                "category": row[4]
+                "category": row[4],
+                "user_id": row[5] # <-- Добавили ID продавца
             })
-        # Возвращаем данные и разрешаем доступ с других сайтов (CORS)
         return web.json_response(ads_list, headers={'Access-Control-Allow-Origin': '*'})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500, headers={'Access-Control-Allow-Origin': '*'})
